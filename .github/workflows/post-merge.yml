@@ -1,0 +1,157 @@
+name: Post-merge release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-merge-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Lint after merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install ruff==0.16.3
+
+      - name: Run Ruff
+        run: python -m ruff check app tests
+
+  test:
+    name: Test after merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run pytest
+        run: python -m pytest -q
+
+  tag:
+    name: Create service version tag
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out repository and tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_tag="$(git tag --points-at "$GITHUB_SHA" --list 'v0.*' | sort -V | head -n 1)"
+          if [[ "$existing_tag" =~ ^v0\.[0-9]+$ ]]; then
+            echo "version=$existing_tag" >> "$GITHUB_OUTPUT"
+            echo "create=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          highest_minor=0
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ ^v0\.([0-9]+)$ ]]; then
+              minor=$((10#${BASH_REMATCH[1]}))
+              if (( minor > highest_minor )); then
+                highest_minor=$minor
+              fi
+            fi
+          done < <(git tag --list 'v0.*')
+
+          next_tag="v0.$((highest_minor + 1))"
+          echo "version=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "create=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        if: steps.version.outputs.create == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$VERSION" --message "Release $VERSION" "$GITHUB_SHA"
+          git push origin "$VERSION"
+
+      - name: Report version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: echo "### Service version $VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  # Docker publishing is intentionally disabled. Uncomment this job when the
+  # repository is ready to publish images to GitHub Container Registry (GHCR).
+  # build-and-push:
+  #   name: Build and publish Docker image
+  #   needs: tag
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 30
+  #   permissions:
+  #     contents: read
+  #     packages: write
+  #
+  #   steps:
+  #     - name: Check out tagged source
+  #       uses: actions/checkout@v6
+  #       with:
+  #         ref: ${{ needs.tag.outputs.version }}
+  #
+  #     - name: Set lowercase image name
+  #       run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+  #
+  #     - name: Log in to GitHub Container Registry
+  #       uses: docker/login-action@v4
+  #       with:
+  #         registry: ghcr.io
+  #         username: ${{ github.actor }}
+  #         password: ${{ secrets.GITHUB_TOKEN }}
+  #
+  #     - name: Build and push Docker image
+  #       uses: docker/build-push-action@v7
+  #       with:
+  #         context: .
+  #         push: true
+  #         tags: |
+  #           ${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.version }}
+  #           ${{ env.IMAGE_NAME }}:latest
