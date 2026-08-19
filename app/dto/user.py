@@ -1,6 +1,13 @@
 from typing import Annotated, Literal
+
 from pydantic import BaseModel, Field, field_validator
-from app.model.user import INSTITUTIONAL_NUMBER_PATTERN, Staff, Student, _normalize_email
+
+from app.model.user import (
+    INSTITUTIONAL_NUMBER_PATTERN,
+    Staff,
+    Student,
+    _normalize_email,
+)
 
 UserResponse = Annotated[Student | Staff, Field(discriminator="role")]
 

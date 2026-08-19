@@ -6,8 +6,8 @@ from app.dto import StaffRegistration, StudentRegistration
 from app.service import (
     AuthenticationError,
     AuthorizationError,
-    StaffRegistrationError,
     IdentityService,
+    StaffRegistrationError,
 )
 
 

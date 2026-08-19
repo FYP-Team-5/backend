@@ -9,11 +9,11 @@ from app.service.user_service import (
 )
 
 __all__ = [
-    "AuthenticationError",
     "AuthService",
+    "AuthenticationError",
     "AuthorizationError",
-    "InvalidTokenError",
     "IdentityService",
+    "InvalidTokenError",
     "PasswordHasher",
     "StaffRegistrationError",
     "TokenManager",

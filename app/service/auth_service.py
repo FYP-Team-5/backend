@@ -1,4 +1,10 @@
-from app.dto import StaffRegistration, StudentRegistration, TokenClaims, TokenResponse, UserResponse
+from app.dto import (
+    StaffRegistration,
+    StudentRegistration,
+    TokenClaims,
+    TokenResponse,
+    UserResponse,
+)
 from app.model import Staff, Student
 
 

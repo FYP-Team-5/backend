@@ -31,6 +31,24 @@ def test_password_hash_is_salted_and_verifiable() -> None:
     assert not hasher.verify("password", "not-a-supported-hash")
 
 
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        "bcrypt$16384$8$1$salt$digest",
+        "scrypt$1$8$1$salt$digest",
+        "scrypt$not-an-int$8$1$salt$digest",
+        "scrypt$16384$8$1$%%%$%%%",
+    ],
+)
+def test_password_verification_rejects_mutated_hash_formats(encoded: str) -> None:
+    assert not PasswordHasher().verify("password", encoded)
+
+
+def test_token_manager_rejects_weak_secret_boundary() -> None:
+    with pytest.raises(ValueError, match="32 bytes"):
+        TokenManager(secret="x" * 31, issuer="issuer", audience="audience", expiry_minutes=1)
+
+
 def test_token_round_trip_and_claims() -> None:
     manager = TokenManager(
         secret="a-test-secret-that-is-at-least-32-bytes",
@@ -73,3 +91,15 @@ def test_rejects_modified_expired_and_wrong_audience_tokens() -> None:
     )
     with pytest.raises(InvalidTokenError, match="issuer or audience"):
         other_audience.verify(token)
+
+
+@pytest.mark.parametrize("token", ["", "one.two", "one.two.three.four", "%%%.%%%.%%%"])
+def test_rejects_malformed_token_boundaries(token: str) -> None:
+    manager = TokenManager(
+        secret="a-test-secret-that-is-at-least-32-bytes",
+        issuer="user-service",
+        audience="assessment-services",
+        expiry_minutes=15,
+    )
+    with pytest.raises(InvalidTokenError, match="malformed|signature"):
+        manager.verify(token)

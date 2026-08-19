@@ -17,9 +17,9 @@ from app.model import Staff, Student
 from app.service import (
     AuthenticationError,
     AuthorizationError,
-    StaffRegistrationError,
     AuthService,
     IdentityService,
+    StaffRegistrationError,
     UserService,
 )
 
