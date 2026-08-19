@@ -2,16 +2,16 @@ import asyncio
 
 import pytest
 
-from app.model import StaffRegistration, StudentRegistration
+from app.dto import StaffRegistration, StudentRegistration
 from app.service import (
     AuthenticationError,
     AuthorizationError,
     StaffRegistrationError,
-    UserService,
+    IdentityService,
 )
 
 
-def test_registration_login_and_authentication(service: UserService) -> None:
+def test_registration_login_and_authentication(service: IdentityService) -> None:
     student = asyncio.run(
         service.register_student(
             StudentRegistration(
@@ -35,7 +35,7 @@ def test_registration_login_and_authentication(service: UserService) -> None:
     assert authenticated == student
 
 
-def test_staff_registration_requires_bootstrap_key(service: UserService) -> None:
+def test_staff_registration_requires_bootstrap_key(service: IdentityService) -> None:
     request = StaffRegistration(
         email="staff@example.edu",
         full_name="Staff One",
@@ -50,7 +50,7 @@ def test_staff_registration_requires_bootstrap_key(service: UserService) -> None
     assert staff.role == "staff"
 
 
-def test_authorization_and_inactive_account(service: UserService) -> None:
+def test_authorization_and_inactive_account(service: IdentityService) -> None:
     student = asyncio.run(
         service.register_student(
             StudentRegistration(

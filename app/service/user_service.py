@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from typing import Literal
 
 from app.config import Settings
 from app.db import PostgresUserRepository, UserNotFoundError
-from app.model import (
-    Staff,
+from app.dto import (
     StaffRegistration,
-    Student,
     StudentRegistration,
     TokenClaims,
     TokenResponse,
     UserResponse,
 )
+from app.model import Staff, Student
 from app.service.security import InvalidTokenError, PasswordHasher, TokenManager
 
 
@@ -29,7 +29,8 @@ class StaffRegistrationError(PermissionError):
     pass
 
 
-class UserService:
+class IdentityService:
+    """Owns shared repository/security lifecycle used by focused services."""
     def __init__(
         self,
         settings: Settings,
@@ -164,3 +165,29 @@ class UserService:
     def require_staff(principal: UserResponse) -> None:
         if not isinstance(principal, Staff):
             raise AuthorizationError("Staff role is required.")
+
+
+class UserService:
+    """Profile queries and staff-only user administration."""
+
+    def __init__(self, core: IdentityService) -> None:
+        self.core = core
+
+    async def list_users(
+        self,
+        principal: UserResponse,
+        *,
+        role: Literal["student", "staff"] | None = None,
+    ) -> list[UserResponse]:
+        return await self.core.list_users(principal, role=role)
+
+    async def get_user(self, principal: UserResponse, user_id: str) -> UserResponse:
+        return await self.core.get_user(principal, user_id)
+
+    async def set_active(
+        self,
+        principal: UserResponse,
+        user_id: str,
+        active: bool,
+    ) -> UserResponse:
+        return await self.core.set_active(principal, user_id, active)

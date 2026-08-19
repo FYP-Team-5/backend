@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from app.model import Staff, Student, User, UserResponse, is_cross_service_id
+from app.dto import UserResponse
+from app.model import Staff, Student, User, is_cross_service_id
 
 
 def _common_fields() -> dict:

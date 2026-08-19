@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import Settings
 from app.db import PostgresUserRepository
 from app.main import create_app
-from app.service import UserService
+from app.service import IdentityService
 
 
 @pytest.fixture
@@ -40,11 +40,11 @@ def repository() -> Iterator[PostgresUserRepository]:
 def service(
     settings: Settings,
     repository: PostgresUserRepository,
-) -> UserService:
-    return UserService(settings, repository=repository)
+) -> IdentityService:
+    return IdentityService(settings, repository=repository)
 
 
 @pytest.fixture
-def client(settings: Settings, service: UserService) -> Iterator[TestClient]:
+def client(settings: Settings, service: IdentityService) -> Iterator[TestClient]:
     with TestClient(create_app(settings=settings, service=service)) as test_client:
         yield test_client

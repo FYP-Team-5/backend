@@ -12,7 +12,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.model import TokenClaims, User
+from app.dto import TokenClaims
+from app.model import User
 
 SCRYPT_N = 2**14
 SCRYPT_R = 8

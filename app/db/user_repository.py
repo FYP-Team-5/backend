@@ -20,7 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.model import Staff, Student, UserResponse
+from app.dto import UserResponse
+from app.model import Staff, Student
 
 metadata = MetaData()
 

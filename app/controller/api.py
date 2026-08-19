@@ -4,26 +4,35 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.db import UserConflictError, UserNotFoundError, UserStoreError
-from app.model import (
+from app.dto import (
     HealthResponse,
     LoginRequest,
-    Staff,
     StaffRegistration,
-    Student,
     StudentRegistration,
     TokenResponse,
     UserResponse,
     UserStatusUpdate,
 )
+from app.model import Staff, Student
 from app.service import (
     AuthenticationError,
     AuthorizationError,
     StaffRegistrationError,
+    AuthService,
+    IdentityService,
     UserService,
 )
 
 
-def get_service(request: Request) -> UserService:
+def get_identity_service(request: Request) -> IdentityService:
+    return request.app.state.identity_service
+
+
+def get_auth_service(request: Request) -> AuthService:
+    return request.app.state.auth_service
+
+
+def get_user_service(request: Request) -> UserService:
     return request.app.state.user_service
 
 
@@ -35,7 +44,7 @@ async def current_user(
         HTTPAuthorizationCredentials | None,
         Depends(bearer_scheme),
     ],
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> UserResponse:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Bearer token is required.")
@@ -47,27 +56,27 @@ async def current_user(
 
 
 health_router = APIRouter(tags=["health"])
-router = APIRouter()
+auth_router = APIRouter(prefix="/auth", tags=["authentication"])
+users_router = APIRouter(prefix="/users", tags=["users"])
 
 
 @health_router.get("/health", response_model=HealthResponse)
 async def health(
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[IdentityService, Depends(get_identity_service)],
 ) -> HealthResponse:
     if not await service.health():
         raise HTTPException(status_code=503, detail={"postgres": "unavailable"})
     return HealthResponse(status="ok", postgres="ok")
 
 
-@router.post(
-    "/auth/register/student",
+@auth_router.post(
+    "/register/student",
     response_model=Student,
     status_code=201,
-    tags=["authentication"],
 )
 async def register_student(
     body: StudentRegistration,
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> Student:
     try:
         return await service.register_student(body)
@@ -77,15 +86,14 @@ async def register_student(
         raise HTTPException(status_code=502, detail="User database failed.") from exc
 
 
-@router.post(
-    "/auth/register/staff",
+@auth_router.post(
+    "/register/staff",
     response_model=Staff,
     status_code=201,
-    tags=["authentication"],
 )
 async def register_staff(
     body: StaffRegistration,
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
     registration_key: Annotated[
         str | None,
         Header(alias="X-Staff-Registration-Key"),
@@ -101,14 +109,13 @@ async def register_staff(
         raise HTTPException(status_code=502, detail="User database failed.") from exc
 
 
-@router.post(
-    "/auth/login",
+@auth_router.post(
+    "/login",
     response_model=TokenResponse,
-    tags=["authentication"],
 )
 async def login(
     body: LoginRequest,
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> TokenResponse:
     try:
         return await service.login(body.email, body.password)
@@ -118,17 +125,17 @@ async def login(
         raise HTTPException(status_code=502, detail="User database failed.") from exc
 
 
-@router.get("/users/me", response_model=UserResponse, tags=["users"])
+@users_router.get("/me", response_model=UserResponse)
 async def get_me(
     principal: Annotated[UserResponse, Depends(current_user)],
 ) -> UserResponse:
     return principal
 
 
-@router.get("/users", response_model=list[UserResponse], tags=["users"])
+@users_router.get("", response_model=list[UserResponse])
 async def list_users(
     principal: Annotated[UserResponse, Depends(current_user)],
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[UserService, Depends(get_user_service)],
     role: Annotated[Literal["student", "staff"] | None, Query()] = None,
 ) -> list[UserResponse]:
     try:
@@ -139,11 +146,11 @@ async def list_users(
         raise HTTPException(status_code=502, detail="User database failed.") from exc
 
 
-@router.get("/users/{user_id}", response_model=UserResponse, tags=["users"])
+@users_router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: str,
     principal: Annotated[UserResponse, Depends(current_user)],
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[UserService, Depends(get_user_service)],
 ) -> UserResponse:
     try:
         return await service.get_user(principal, user_id)
@@ -155,16 +162,15 @@ async def get_user(
         raise HTTPException(status_code=502, detail="User database failed.") from exc
 
 
-@router.patch(
-    "/users/{user_id}/status",
+@users_router.patch(
+    "/{user_id}/status",
     response_model=UserResponse,
-    tags=["users"],
 )
 async def update_user_status(
     user_id: str,
     body: UserStatusUpdate,
     principal: Annotated[UserResponse, Depends(current_user)],
-    service: Annotated[UserService, Depends(get_service)],
+    service: Annotated[UserService, Depends(get_user_service)],
 ) -> UserResponse:
     try:
         return await service.set_active(principal, user_id, body.active)

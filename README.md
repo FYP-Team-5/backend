@@ -54,6 +54,29 @@ Shared fields are:
 
 The PostgreSQL schema mirrors the inheritance model with a common `users` table and one-to-one `student_profiles` and `staff_profiles` tables. Emails are globally unique. Student numbers are unique among students, and staff numbers are unique among staff.
 
+### Database-backed models
+
+| Model | Attributes | Purpose |
+|---|---|---|
+| `User` | `id`, `email`, `full_name`, `role`, `active`, `created_at`, `updated_at` | Parent domain model backed by the common `users` table (whose persistence-only fields also include `password_hash`). |
+| `Student` | All `User` fields plus `student_number` | Student subtype backed by `users` and its mandatory application-level one-to-one `student_profiles` row. |
+| `Staff` | All `User` fields plus `staff_number` | Staff subtype backed by `users` and its mandatory application-level one-to-one `staff_profiles` row. |
+
+### DTOs
+
+DTO definitions live in `app/dto/`; they represent requests, responses, and signed-token payloads and are not stored as database rows.
+
+| DTO | Attributes | Purpose |
+|---|---|---|
+| `StudentRegistration` | `email`, `full_name`, `password`, `student_number` | Student registration request. |
+| `StaffRegistration` | `email`, `full_name`, `password`, `staff_number` | Staff registration request. |
+| `LoginRequest` | `email`, `password` | Login credentials request. |
+| `UserResponse` | Discriminated union of `Student` or `Staff` | Returns the correctly typed public user profile. |
+| `TokenResponse` | `access_token`, `token_type`, `expires_in`, `user` | Successful login/registration response. |
+| `UserStatusUpdate` | `active` | Staff request to activate or deactivate a user. |
+| `TokenClaims` | `sub`, `role`, `email`, `institutional_number`, `iss`, `aud`, `iat`, `exp`, `jti` | Validated JWT claims used by authentication. |
+| `HealthResponse` | `status`, `postgres` | Health endpoint response. |
+
 ## Authentication and authorization
 
 Passwords must contain 12–256 characters and are stored as salted `scrypt` hashes. A successful login returns a signed HS256 bearer token. The token contains:

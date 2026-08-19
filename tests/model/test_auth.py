@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from app.model import Student, TokenClaims
+from app.dto import TokenClaims
+from app.model import Student
 from app.service import TokenManager
 
 

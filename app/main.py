@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
-from app.controller import health_router, router
-from app.service import UserService
+from app.controller import auth_router, health_router, users_router
+from app.service import AuthService, IdentityService, UserService
 
 OPENAPI_TAGS = [
     {"name": "health", "description": "User database readiness."},
@@ -23,10 +23,10 @@ OPENAPI_TAGS = [
 def create_app(
     *,
     settings: Settings | None = None,
-    service: UserService | None = None,
+    service: IdentityService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    user_service = service or UserService(settings)
+    identity_service = service or IdentityService(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -35,12 +35,12 @@ def create_app(
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
         app.state.settings = settings
-        app.state.user_service = user_service
-        await user_service.initialize()
+        app.state.identity_service = identity_service
+        await identity_service.initialize()
         try:
             yield
         finally:
-            await user_service.close()
+            await identity_service.close()
 
     app = FastAPI(
         title=settings.app_name,
@@ -57,7 +57,9 @@ def create_app(
         swagger_ui_parameters={"displayRequestDuration": True, "filter": True},
     )
     app.state.settings = settings
-    app.state.user_service = user_service
+    app.state.identity_service = identity_service
+    app.state.auth_service = AuthService(identity_service)
+    app.state.user_service = UserService(identity_service)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
@@ -66,7 +68,8 @@ def create_app(
         allow_headers=["*"],
     )
     app.include_router(health_router)
-    app.include_router(router, prefix=settings.api_v1_prefix)
+    app.include_router(auth_router, prefix=settings.api_v1_prefix)
+    app.include_router(users_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
