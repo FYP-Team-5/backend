@@ -7,26 +7,46 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
-from app.controller import auth_router, health_router, users_router
-from app.service import AuthService, IdentityService, UserService
+from app.controller import auth_router, courses_router, exams_router, health_router, users_router
+from app.service import AuthService, AttemptService, CatalogService, GradingService, IdentityService, UserService
 
 OPENAPI_TAGS = [
-    {"name": "health", "description": "User database readiness."},
+    {
+        "name": "health",
+        "description": "Storage and LLM dependency readiness status."
+    },
     {
         "name": "authentication",
         "description": "Register student/staff accounts and issue access tokens.",
     },
-    {"name": "users", "description": "Inspect and administer user profiles."},
+    {
+        "name": "users",
+        "description": "Inspect and administer user profiles."
+    },
+    {
+        "name": "catalog",
+        "description": "Manage courses, exams, questions, and rubric mappings.",
+    },
+    {
+        "name": "attempts",
+        "description": "Create and inspect student attempts."
+    },
+    {
+        "name": "grading",
+        "description": "Grade one or more responses within a student attempt.",
+    },
 ]
 
 
 def create_app(
     *,
     settings: Settings | None = None,
-    service: IdentityService | None = None,
+    identity_service: IdentityService | None = None,
+    grading_service: GradingService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    identity_service = service or IdentityService(settings)
+    identity_service = identity_service or IdentityService(settings)
+    grading_service = grading_service or GradingService(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -37,17 +57,18 @@ def create_app(
         app.state.settings = settings
         app.state.identity_service = identity_service
         await identity_service.initialize()
+        await grading_service.initialize()
         try:
             yield
         finally:
             await identity_service.close()
+            await grading_service.close()
 
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description=(
-            "Own student/staff identities, verify credentials, and issue bearer "
-            "tokens for the assessment services."
+            "Backend Services"
         ),
         lifespan=lifespan,
         openapi_tags=OPENAPI_TAGS,
@@ -58,8 +79,11 @@ def create_app(
     )
     app.state.settings = settings
     app.state.identity_service = identity_service
+    app.state.grading_service = grading_service
     app.state.auth_service = AuthService(identity_service)
     app.state.user_service = UserService(identity_service)
+    app.state.catalogue_service = CatalogService(grading_service)
+    app.state.attempt_service = AttemptService(grading_service)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
@@ -70,6 +94,8 @@ def create_app(
     app.include_router(health_router)
     app.include_router(auth_router, prefix=settings.api_v1_prefix)
     app.include_router(users_router, prefix=settings.api_v1_prefix)
+    app.include_router(courses_router, prefix=settings.api_v1_prefix)
+    app.include_router(exams_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:

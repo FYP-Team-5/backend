@@ -1,4 +1,4 @@
-name: user-service
+name: backend-service
 
 services:
   api:
@@ -8,18 +8,35 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      API_KEY: ${API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-user}
+      RAG_DATABASE_URL: postgresql+psycopg://${RAG_POSTGRES_USER:-rag}:${RAG_POSTGRES_PASSWORD:-rag}@postgres:5432/${RAG_POSTGRES_DB:-rag}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-change-me}@backend-postgres:5432/${POSTGRES_DB:-user}
       JWT_SECRET: ${JWT_SECRET:-development-only-change-me-at-least-32-bytes}
       JWT_ISSUER: ${JWT_ISSUER:-user-service}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-assessment-services}
       ACCESS_TOKEN_EXPIRY_MINUTES: ${ACCESS_TOKEN_EXPIRY_MINUTES:-30}
       STAFF_REGISTRATION_KEY: ${STAFF_REGISTRATION_KEY:-development-staff-bootstrap-key}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rubric_chunks}
+      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-30}
+      LLM_URL: ${LLM_URL:-http://host.docker.internal:11434/v1/chat/completions}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2000}
+      MAX_ANSWER_CHARACTERS: ${MAX_ANSWER_CHARACTERS:-50000}
     ports:
       - "${API_PORT:-8002}:8002"
     depends_on:
-      postgres:
+      backend-postgres:
         condition: service_healthy
+    networks:
+      - default
+      - rag_network
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8002/health"]
       interval: 15s
@@ -27,7 +44,7 @@ services:
       start_period: 30s
       retries: 5
 
-  postgres:
+  backend-postgres:
     image: postgres:18.4-alpine
     restart: unless-stopped
     environment:
@@ -46,3 +63,8 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  rag_network:
+    external: true
+    name: rubric-rag_default

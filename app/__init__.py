@@ -1,1 +1,1 @@
-"""User identity and authentication service."""
+"""Backend service."""
