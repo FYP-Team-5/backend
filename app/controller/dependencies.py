@@ -22,15 +22,13 @@ from app.service import (
 def get_identity_service(request: Request) -> IdentityService:
     return request.app.state.identity_service
 
-
 def get_auth_service(request: Request) -> AuthService:
     return request.app.state.auth_service
-
 
 def get_user_service(request: Request) -> UserService:
     return request.app.state.user_service
 
-def get_service(request: Request) -> GradingService:
+def get_grading_service(request: Request) -> GradingService:
     return request.app.state.grading_service
 
 def get_catalog_service(request: Request) -> CatalogService:

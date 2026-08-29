@@ -11,9 +11,9 @@ from app.service import (
 )
 
 
-def test_registration_login_and_authentication(service: IdentityService) -> None:
+def test_registration_login_and_authentication(identity_service: IdentityService) -> None:
     student = asyncio.run(
-        service.register_student(
+        identity_service.register_student(
             StudentRegistration(
                 email=" STUDENT@EXAMPLE.EDU ",
                 full_name="  Student   One ",
@@ -24,9 +24,9 @@ def test_registration_login_and_authentication(service: IdentityService) -> None
     )
 
     result = asyncio.run(
-        service.login("student@example.edu", "a-secure-student-password")
+        identity_service.login("student@example.edu", "a-secure-student-password")
     )
-    claims, authenticated = asyncio.run(service.authenticate(result.access_token))
+    claims, authenticated = asyncio.run(identity_service.authenticate(result.access_token))
 
     assert student.email == "student@example.edu"
     assert student.full_name == "Student One"
@@ -35,7 +35,7 @@ def test_registration_login_and_authentication(service: IdentityService) -> None
     assert authenticated == student
 
 
-def test_staff_registration_requires_bootstrap_key(service: IdentityService) -> None:
+def test_staff_registration_requires_bootstrap_key(identity_service: IdentityService) -> None:
     request = StaffRegistration(
         email="staff@example.edu",
         full_name="Staff One",
@@ -44,15 +44,15 @@ def test_staff_registration_requires_bootstrap_key(service: IdentityService) -> 
     )
 
     with pytest.raises(StaffRegistrationError):
-        asyncio.run(service.register_staff(request, "wrong-key"))
+        asyncio.run(identity_service.register_staff(request, "wrong-key"))
 
-    staff = asyncio.run(service.register_staff(request, "test-staff-registration-key"))
+    staff = asyncio.run(identity_service.register_staff(request, "test-staff-registration-key"))
     assert staff.role == "staff"
 
 
-def test_authorization_and_inactive_account(service: IdentityService) -> None:
+def test_authorization_and_inactive_account(identity_service: IdentityService) -> None:
     student = asyncio.run(
-        service.register_student(
+        identity_service.register_student(
             StudentRegistration(
                 email="student@example.edu",
                 full_name="Student One",
@@ -62,7 +62,7 @@ def test_authorization_and_inactive_account(service: IdentityService) -> None:
         )
     )
     staff = asyncio.run(
-        service.register_staff(
+        identity_service.register_staff(
             StaffRegistration(
                 email="staff@example.edu",
                 full_name="Staff One",
@@ -74,16 +74,16 @@ def test_authorization_and_inactive_account(service: IdentityService) -> None:
     )
 
     with pytest.raises(AuthorizationError):
-        asyncio.run(service.list_users(student))
-    assert len(asyncio.run(service.list_users(staff))) == 2
+        asyncio.run(identity_service.list_users(student))
+    assert len(asyncio.run(identity_service.list_users(staff))) == 2
     with pytest.raises(AuthorizationError, match="own account"):
-        asyncio.run(service.set_active(staff, staff.id, False))
+        asyncio.run(identity_service.set_active(staff, staff.id, False))
 
     token = asyncio.run(
-        service.login(student.email, "a-secure-student-password")
+        identity_service.login(student.email, "a-secure-student-password")
     ).access_token
-    asyncio.run(service.set_active(staff, student.id, False))
+    asyncio.run(identity_service.set_active(staff, student.id, False))
     with pytest.raises(AuthenticationError, match="inactive"):
-        asyncio.run(service.login(student.email, "a-secure-student-password"))
+        asyncio.run(identity_service.login(student.email, "a-secure-student-password"))
     with pytest.raises(AuthenticationError, match="inactive"):
-        asyncio.run(service.authenticate(token))
+        asyncio.run(identity_service.authenticate(token))

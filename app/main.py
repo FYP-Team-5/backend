@@ -95,7 +95,7 @@ def create_app(
     app.state.grading_service = grading_service
     app.state.auth_service = AuthService(identity_service)
     app.state.user_service = UserService(identity_service)
-    app.state.catalogue_service = CatalogService(grading_service)
+    app.state.catalog_service = CatalogService(grading_service)
     app.state.attempt_service = AttemptService(grading_service)
     app.add_middleware(
         CORSMiddleware,
