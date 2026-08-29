@@ -7,8 +7,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app.config import Settings, get_settings
-from app.controller import auth_router, courses_router, exams_router, health_router, users_router
-from app.service import AuthService, AttemptService, CatalogService, GradingService, IdentityService, UserService
+from app.controller import (
+    auth_router,
+    courses_router,
+    exams_router,
+    health_router,
+    users_router,
+)
+from app.service import (
+    AttemptService,
+    AuthService,
+    CatalogService,
+    GradingService,
+    IdentityService,
+    UserService,
+)
 
 OPENAPI_TAGS = [
     {

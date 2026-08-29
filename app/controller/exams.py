@@ -2,7 +2,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 
-from app.controller.dependencies import require_api_key, ID_PATTERN, get_catalog_service, require_student_id, get_attempt_service
+from app.controller.dependencies import (
+    ID_PATTERN,
+    get_attempt_service,
+    get_catalog_service,
+    require_api_key,
+    require_student_id,
+)
 from app.db import (
     AttemptLimitExceededError,
     AttemptStateError,
@@ -19,7 +25,7 @@ from app.dto import (
     GradeAttemptRequest,
     RubricChunkMappingRequest,
 )
-from app.model import Attempt, Course, Exam, Question
+from app.model import Attempt, Exam, Question
 from app.service import (
     AttemptService,
     CatalogService,

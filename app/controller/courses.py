@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 
-from app.controller.dependencies import get_catalog_service, ID_PATTERN, require_api_key
+from app.controller.dependencies import ID_PATTERN, get_catalog_service, require_api_key
 from app.db import (
     GradingConflictError,
     GradingRecordNotFoundError,
