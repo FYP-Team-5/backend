@@ -9,8 +9,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -52,13 +54,16 @@ exams = Table(
 questions = Table(
     "grading_questions",
     grading_metadata,
-    Column("id", String(128), primary_key=True),
+    # id is only unique *within an exam* (matching the instructor-supplied CSV
+    # question_id), not globally — two different exams may both have a "Q001".
+    Column("id", String(128), nullable=False),
     Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
     Column("position", Integer, nullable=False),
     Column("prompt", Text, nullable=False),
     Column("max_score", Float, nullable=False),
     Column("criteria", JSON, nullable=False),
     Column("rubric_chunk_indexes", JSON, nullable=False),
+    PrimaryKeyConstraint("exam_id", "id", name="pk_grading_questions"),
     UniqueConstraint("exam_id", "position", name="uq_grading_question_position"),
 )
 
@@ -88,10 +93,15 @@ responses = Table(
     grading_metadata,
     Column("id", String(36), primary_key=True),
     Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
-    Column("question_id", ForeignKey("grading_questions.id"), nullable=False),
+    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
+    Column("question_id", String(128), nullable=False),
     Column("answer", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["exam_id", "question_id"],
+        ["grading_questions.exam_id", "grading_questions.id"],
+    ),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
 )
 
@@ -101,7 +111,8 @@ grades = Table(
     Column("id", String(36), primary_key=True),
     Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
     Column("response_id", ForeignKey("grading_responses.id"), nullable=False),
-    Column("question_id", ForeignKey("grading_questions.id"), nullable=False),
+    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
+    Column("question_id", String(128), nullable=False),
     Column("score", Float, nullable=False),
     Column("max_score", Float, nullable=False),
     Column("feedback", Text, nullable=False),
@@ -112,6 +123,10 @@ grades = Table(
     Column("llm_model", String(255), nullable=False),
     Column("prompt_version", String(64), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["exam_id", "question_id"],
+        ["grading_questions.exam_id", "grading_questions.id"],
+    ),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_grade"),
 )
 
@@ -396,7 +411,9 @@ class PostgresGradingRepository:
             rows = connection.execute(statement).mappings().all()
         return [Attempt.model_validate(dict(row)) for row in rows]
 
-    def save_response(self, attempt_id: str, question_id: str, answer: str) -> str:
+    def save_response(
+        self, attempt_id: str, exam_id: str, question_id: str, answer: str
+    ) -> str:
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
             row = connection.execute(
@@ -411,6 +428,7 @@ class PostgresGradingRepository:
                     insert(responses).values(
                         id=response_id,
                         attempt_id=attempt_id,
+                        exam_id=exam_id,
                         question_id=question_id,
                         answer=answer,
                         created_at=now,
@@ -430,6 +448,7 @@ class PostgresGradingRepository:
         self,
         *,
         attempt_id: str,
+        exam_id: str,
         response_id: str,
         question_id: str,
         score: float,
@@ -468,6 +487,7 @@ class PostgresGradingRepository:
                     insert(grades).values(
                         id=str(uuid.uuid4()),
                         attempt_id=attempt_id,
+                        exam_id=exam_id,
                         question_id=question_id,
                         **values,
                     )
@@ -480,7 +500,11 @@ class PostgresGradingRepository:
     def list_grades(self, attempt_id: str) -> list[QuestionGrade]:
         statement = (
             select(grades, questions.c.position)
-            .join(questions, questions.c.id == grades.c.question_id)
+            .join(
+                questions,
+                (questions.c.id == grades.c.question_id)
+                & (questions.c.exam_id == grades.c.exam_id),
+            )
             .where(grades.c.attempt_id == attempt_id)
             .order_by(questions.c.position)
         )

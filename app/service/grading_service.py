@@ -252,6 +252,7 @@ class GradingService:
             response_id = await asyncio.to_thread(
                 self.grading_store.save_response,
                 attempt_id,
+                exam_id,
                 question.id,
                 answer,
             )
@@ -273,6 +274,7 @@ class GradingService:
                 await asyncio.to_thread(
                     self.grading_store.save_grade,
                     attempt_id=attempt_id,
+                    exam_id=exam_id,
                     response_id=response_id,
                     question_id=question.id,
                     score=result.score,
