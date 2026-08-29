@@ -23,7 +23,7 @@ from app.dto.user import (
 __all__ = [
     "HealthResponse",
     "LoginRequest",
-    "StaffRegistration"
+    "StaffRegistration",
     "StudentRegistration",
     "TokenClaims",
     "TokenResponse",
@@ -33,12 +33,12 @@ __all__ = [
     "CourseCreate",
     "CriterionGrade",
     "ExamCreate",
-    "ExamRubricUpdate"
+    "ExamRubricUpdate",
     "GradeAttemptRequest",
     "GradingResult",
     "HealthResponse",
     "QuestionCreate",
     "QuestionResponseSubmission",
     "RetrievedRubricChunk",
-    "RubricChunkMappingRequest"
+    "RubricChunkMappingRequest",
 ]
