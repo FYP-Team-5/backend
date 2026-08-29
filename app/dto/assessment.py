@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -7,13 +7,15 @@ from app.model.assessment import Attempt, QuestionGrade
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 
 class CourseCreate(BaseModel):
-    id: str = Field(pattern=ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
 
 class QuestionCreate(BaseModel):
     id: str = Field(pattern=ID_PATTERN)
     prompt: str = Field(min_length=1, max_length=10_000)
     max_score: float = Field(gt=0)
+    criteria: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=100
+    )
     rubric_chunk_indexes: list[int] = Field(default_factory=list)
     @field_validator("rubric_chunk_indexes")
     @classmethod
@@ -23,11 +25,10 @@ class QuestionCreate(BaseModel):
         return value
 
 class ExamCreate(BaseModel):
-    id: str = Field(pattern=ID_PATTERN)
     title: str = Field(min_length=1, max_length=300)
     type: Literal["exam", "quiz"] = "exam"
     max_attempts: int = Field(default=1, ge=1, le=100)
-    rubric_id: str = Field(pattern=ID_PATTERN)
+    rubric_id: str | None = Field(default=None, pattern=ID_PATTERN)
     questions: list[QuestionCreate] = Field(min_length=1, max_length=500)
     @model_validator(mode="after")
     def validate_question_ids(self) -> "ExamCreate":

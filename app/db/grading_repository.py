@@ -9,8 +9,10 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -45,19 +47,23 @@ exams = Table(
     Column("title", String(300), nullable=False),
     Column("type", String(16), nullable=False),
     Column("max_attempts", Integer, nullable=False),
-    Column("rubric_id", String(128), nullable=False, unique=True),
+    Column("rubric_id", String(128), nullable=True, unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
 questions = Table(
     "grading_questions",
     grading_metadata,
-    Column("id", String(128), primary_key=True),
+    # id is only unique *within an exam* (matching the instructor-supplied CSV
+    # question_id), not globally — two different exams may both have a "Q001".
+    Column("id", String(128), nullable=False),
     Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
     Column("position", Integer, nullable=False),
     Column("prompt", Text, nullable=False),
     Column("max_score", Float, nullable=False),
+    Column("criteria", JSON, nullable=False),
     Column("rubric_chunk_indexes", JSON, nullable=False),
+    PrimaryKeyConstraint("exam_id", "id", name="pk_grading_questions"),
     UniqueConstraint("exam_id", "position", name="uq_grading_question_position"),
 )
 
@@ -87,10 +93,15 @@ responses = Table(
     grading_metadata,
     Column("id", String(36), primary_key=True),
     Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
-    Column("question_id", ForeignKey("grading_questions.id"), nullable=False),
+    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
+    Column("question_id", String(128), nullable=False),
     Column("answer", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["exam_id", "question_id"],
+        ["grading_questions.exam_id", "grading_questions.id"],
+    ),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
 )
 
@@ -100,7 +111,8 @@ grades = Table(
     Column("id", String(36), primary_key=True),
     Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
     Column("response_id", ForeignKey("grading_responses.id"), nullable=False),
-    Column("question_id", ForeignKey("grading_questions.id"), nullable=False),
+    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
+    Column("question_id", String(128), nullable=False),
     Column("score", Float, nullable=False),
     Column("max_score", Float, nullable=False),
     Column("feedback", Text, nullable=False),
@@ -111,6 +123,10 @@ grades = Table(
     Column("llm_model", String(255), nullable=False),
     Column("prompt_version", String(64), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["exam_id", "question_id"],
+        ["grading_questions.exam_id", "grading_questions.id"],
+    ),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_grade"),
 )
 
@@ -160,10 +176,17 @@ class PostgresGradingRepository:
         except SQLAlchemyError:
             return False
 
-    def create_course(self, course_id: str, title: str) -> Course:
+    def create_course(self, title: str) -> Course:
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
+                # Course ids are auto-incremented, one higher than the current max
+                # *numeric* id. Computed in Python rather than SQL CAST so that
+                # any pre-existing non-numeric ids (e.g. from before this change)
+                # are simply ignored instead of raising a DB-level cast error.
+                existing_ids = connection.execute(select(courses.c.id)).scalars().all()
+                numeric_ids = [int(value) for value in existing_ids if value.isdigit()]
+                course_id = str(max(numeric_ids, default=0) + 1)
                 connection.execute(
                     insert(courses).values(id=course_id, title=title, created_at=now)
                 )
@@ -185,7 +208,7 @@ class PostgresGradingRepository:
     def list_courses(self) -> list[Course]:
         with self.engine.connect() as connection:
             rows = (
-                connection.execute(select(courses).order_by(courses.c.id))
+                connection.execute(select(courses).order_by(courses.c.created_at))
                 .mappings()
                 .all()
             )
@@ -193,13 +216,14 @@ class PostgresGradingRepository:
 
     def create_exam(self, course_id: str, request: ExamCreate) -> Exam:
         now = datetime.now(UTC)
+        exam_id = str(uuid.uuid4())
         try:
             with self.engine.begin() as connection:
                 if not self._course_exists(connection, course_id):
                     raise GradingRecordNotFoundError(course_id)
                 connection.execute(
                     insert(exams).values(
-                        id=request.id,
+                        id=exam_id,
                         course_id=course_id,
                         title=request.title,
                         type=request.type,
@@ -213,10 +237,11 @@ class PostgresGradingRepository:
                     [
                         {
                             "id": question.id,
-                            "exam_id": request.id,
+                            "exam_id": exam_id,
                             "position": position,
                             "prompt": question.prompt,
                             "max_score": question.max_score,
+                            "criteria": question.criteria,
                             "rubric_chunk_indexes": question.rubric_chunk_indexes,
                         }
                         for position, question in enumerate(request.questions)
@@ -226,7 +251,7 @@ class PostgresGradingRepository:
             raise GradingConflictError(
                 "Exam, rubric, or question identifiers already exist."
             ) from exc
-        return self.get_exam(request.id)
+        return self.get_exam(exam_id)
 
     def get_exam(self, exam_id: str) -> Exam:
         try:
@@ -386,7 +411,9 @@ class PostgresGradingRepository:
             rows = connection.execute(statement).mappings().all()
         return [Attempt.model_validate(dict(row)) for row in rows]
 
-    def save_response(self, attempt_id: str, question_id: str, answer: str) -> str:
+    def save_response(
+        self, attempt_id: str, exam_id: str, question_id: str, answer: str
+    ) -> str:
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
             row = connection.execute(
@@ -401,6 +428,7 @@ class PostgresGradingRepository:
                     insert(responses).values(
                         id=response_id,
                         attempt_id=attempt_id,
+                        exam_id=exam_id,
                         question_id=question_id,
                         answer=answer,
                         created_at=now,
@@ -420,6 +448,7 @@ class PostgresGradingRepository:
         self,
         *,
         attempt_id: str,
+        exam_id: str,
         response_id: str,
         question_id: str,
         score: float,
@@ -458,6 +487,7 @@ class PostgresGradingRepository:
                     insert(grades).values(
                         id=str(uuid.uuid4()),
                         attempt_id=attempt_id,
+                        exam_id=exam_id,
                         question_id=question_id,
                         **values,
                     )
@@ -470,7 +500,11 @@ class PostgresGradingRepository:
     def list_grades(self, attempt_id: str) -> list[QuestionGrade]:
         statement = (
             select(grades, questions.c.position)
-            .join(questions, questions.c.id == grades.c.question_id)
+            .join(
+                questions,
+                (questions.c.id == grades.c.question_id)
+                & (questions.c.exam_id == grades.c.exam_id),
+            )
             .where(grades.c.attempt_id == attempt_id)
             .order_by(questions.c.position)
         )
