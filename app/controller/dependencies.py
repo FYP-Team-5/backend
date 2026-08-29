@@ -3,20 +3,21 @@ import secrets
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request
-from fastapi.security import APIKeyHeader ,HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 from app.dto import (
     UserResponse,
 )
 from app.service import (
+    AttemptService,
     AuthenticationError,
     AuthService,
-    IdentityService,
-    UserService,
-    AttemptService,
     CatalogService,
     GradingService,
+    IdentityService,
+    UserService,
 )
+
 
 def get_identity_service(request: Request) -> IdentityService:
     return request.app.state.identity_service

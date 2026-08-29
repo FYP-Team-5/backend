@@ -21,14 +21,6 @@ from app.dto.user import (
 )
 
 __all__ = [
-    "HealthResponse",
-    "LoginRequest",
-    "StaffRegistration",
-    "StudentRegistration",
-    "TokenClaims",
-    "TokenResponse",
-    "UserResponse",
-    "UserStatusUpdate"
     "AttemptGradeResponse",
     "CourseCreate",
     "CriterionGrade",
@@ -37,8 +29,15 @@ __all__ = [
     "GradeAttemptRequest",
     "GradingResult",
     "HealthResponse",
+    "LoginRequest",
     "QuestionCreate",
     "QuestionResponseSubmission",
     "RetrievedRubricChunk",
     "RubricChunkMappingRequest",
+    "StaffRegistration",
+    "StudentRegistration",
+    "TokenClaims",
+    "TokenResponse",
+    "UserResponse",
+    "UserStatusUpdate",
 ]
