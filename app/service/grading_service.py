@@ -9,6 +9,7 @@ from app.db import (
     PostgresGradingRepository,
     PostgresRubricMetadataRepository,
     QdrantRubricChunkRepository,
+    RubricMetadataNotFoundError,
 )
 from app.dto import (
     AttemptGradeResponse,
@@ -127,7 +128,6 @@ class GradingService:
     async def create_course(self, request: CourseCreate) -> Course:
         return await asyncio.to_thread(
             self.grading_store.create_course,
-            request.id,
             request.title,
         )
 
@@ -167,6 +167,8 @@ class GradingService:
         chunk_indexes: list[int],
     ) -> Question:
         exam = await self.get_exam(exam_id)
+        if exam.rubric_id is None:
+            raise RubricMetadataNotFoundError(exam_id)
         rubric = await asyncio.to_thread(self.rubric_store.get, exam.rubric_id)
         self._validate_rubric(exam, rubric)
         available_indexes = await self._available_chunk_indexes(rubric)
@@ -184,6 +186,8 @@ class GradingService:
 
     async def create_attempt(self, exam_id: str, student_id: str) -> Attempt:
         exam = await self.get_exam(exam_id)
+        if exam.rubric_id is None:
+            raise RubricMetadataNotFoundError(exam_id)
         rubric = await asyncio.to_thread(self.rubric_store.get, exam.rubric_id)
         self._validate_rubric(exam, rubric)
         if any(not question.rubric_chunk_indexes for question in exam.questions):

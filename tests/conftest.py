@@ -46,5 +46,5 @@ def service(
 
 @pytest.fixture
 def client(settings: Settings, service: IdentityService) -> Iterator[TestClient]:
-    with TestClient(create_app(settings=settings, service=service)) as test_client:
+    with TestClient(create_app(settings=settings, identity_service=service)) as test_client:
         yield test_client

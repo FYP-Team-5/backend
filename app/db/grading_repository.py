@@ -45,7 +45,7 @@ exams = Table(
     Column("title", String(300), nullable=False),
     Column("type", String(16), nullable=False),
     Column("max_attempts", Integer, nullable=False),
-    Column("rubric_id", String(128), nullable=False, unique=True),
+    Column("rubric_id", String(128), nullable=True, unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -57,6 +57,7 @@ questions = Table(
     Column("position", Integer, nullable=False),
     Column("prompt", Text, nullable=False),
     Column("max_score", Float, nullable=False),
+    Column("criteria", JSON, nullable=False),
     Column("rubric_chunk_indexes", JSON, nullable=False),
     UniqueConstraint("exam_id", "position", name="uq_grading_question_position"),
 )
@@ -160,10 +161,17 @@ class PostgresGradingRepository:
         except SQLAlchemyError:
             return False
 
-    def create_course(self, course_id: str, title: str) -> Course:
+    def create_course(self, title: str) -> Course:
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
+                # Course ids are auto-incremented, one higher than the current max
+                # *numeric* id. Computed in Python rather than SQL CAST so that
+                # any pre-existing non-numeric ids (e.g. from before this change)
+                # are simply ignored instead of raising a DB-level cast error.
+                existing_ids = connection.execute(select(courses.c.id)).scalars().all()
+                numeric_ids = [int(value) for value in existing_ids if value.isdigit()]
+                course_id = str(max(numeric_ids, default=0) + 1)
                 connection.execute(
                     insert(courses).values(id=course_id, title=title, created_at=now)
                 )
@@ -185,7 +193,7 @@ class PostgresGradingRepository:
     def list_courses(self) -> list[Course]:
         with self.engine.connect() as connection:
             rows = (
-                connection.execute(select(courses).order_by(courses.c.id))
+                connection.execute(select(courses).order_by(courses.c.created_at))
                 .mappings()
                 .all()
             )
@@ -193,13 +201,14 @@ class PostgresGradingRepository:
 
     def create_exam(self, course_id: str, request: ExamCreate) -> Exam:
         now = datetime.now(UTC)
+        exam_id = str(uuid.uuid4())
         try:
             with self.engine.begin() as connection:
                 if not self._course_exists(connection, course_id):
                     raise GradingRecordNotFoundError(course_id)
                 connection.execute(
                     insert(exams).values(
-                        id=request.id,
+                        id=exam_id,
                         course_id=course_id,
                         title=request.title,
                         type=request.type,
@@ -213,10 +222,11 @@ class PostgresGradingRepository:
                     [
                         {
                             "id": question.id,
-                            "exam_id": request.id,
+                            "exam_id": exam_id,
                             "position": position,
                             "prompt": question.prompt,
                             "max_score": question.max_score,
+                            "criteria": question.criteria,
                             "rubric_chunk_indexes": question.rubric_chunk_indexes,
                         }
                         for position, question in enumerate(request.questions)
@@ -226,7 +236,7 @@ class PostgresGradingRepository:
             raise GradingConflictError(
                 "Exam, rubric, or question identifiers already exist."
             ) from exc
-        return self.get_exam(request.id)
+        return self.get_exam(exam_id)
 
     def get_exam(self, exam_id: str) -> Exam:
         try:

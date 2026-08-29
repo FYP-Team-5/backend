@@ -13,6 +13,7 @@ class Question(BaseModel):
     id: str
     prompt: str
     max_score: float = Field(gt=0)
+    criteria: list[str] = Field(default_factory=list)
     rubric_chunk_indexes: list[int] = Field(default_factory=list)
     position: int = Field(ge=0)
 
@@ -22,7 +23,7 @@ class Exam(BaseModel):
     title: str
     type: Literal["exam", "quiz"]
     max_attempts: int
-    rubric_id: str
+    rubric_id: str | None = None
     questions: list[Question]
     created_at: datetime
 
