@@ -10,7 +10,7 @@ from app.model import Staff, Student, User, is_cross_service_id
 def _common_fields() -> dict:
     now = datetime.now(UTC)
     return {
-        "id": "60f1ec55-f74e-4924-a9ee-1d79f902f846",
+        "id": "1000001",
         "email": " PERSON@EXAMPLE.EDU ",
         "full_name": "Person One",
         "active": True,
@@ -27,7 +27,7 @@ def test_student_and_staff_inherit_from_user() -> None:
     assert isinstance(staff, User)
     assert student.email == "person@example.edu"
     assert student.role == "student"
-    assert staff.role == "staff"
+    assert staff.role == "instructor"
 
 
 def test_discriminated_user_response_preserves_profile_type() -> None:
@@ -37,17 +37,17 @@ def test_discriminated_user_response_preserves_profile_type() -> None:
         {**_common_fields(), "role": "student", "student_number": "S0001"}
     )
     staff = adapter.validate_python(
-        {**_common_fields(), "role": "staff", "staff_number": "E0001"}
+        {**_common_fields(), "id": "2000001", "role": "instructor", "staff_number": "E0001"}
     )
 
     assert isinstance(student, Student)
     assert isinstance(staff, Staff)
 
 
-def test_user_uuid_is_compatible_with_grading_student_id_contract() -> None:
+def test_numeric_user_id_is_compatible_with_grading_student_id_contract() -> None:
     user = Student(**_common_fields(), student_number="S0001")
 
-    assert len(user.id) == 36
+    assert user.id.isdigit()
     assert is_cross_service_id(user.id)
 
     with pytest.raises(ValidationError):

@@ -11,7 +11,7 @@ from app.service import AuthService, UserService
 
 def _student() -> Student:
     now = datetime.now(UTC)
-    return Student(id="60f1ec55-f74e-4924-a9ee-1d79f902f846", email="s@example.edu", full_name="S", active=True, created_at=now, updated_at=now, student_number="S1")
+    return Student(id="1000001", email="s@example.edu", full_name="S", active=True, created_at=now, updated_at=now, student_number="S1")
 
 
 class CoreSpy:
@@ -56,6 +56,8 @@ def test_login_rejects_malformed_email(email: str) -> None:
 
 
 def test_user_response_rejects_role_profile_mismatch() -> None:
-    payload = _student().model_dump() | {"role": "staff"}
+    payload = _student().model_dump()
+    payload.pop("student_number")
+    payload.update({"role": "instructor", "id": "2000001"})
     with pytest.raises(ValidationError):
         TypeAdapter(UserResponse).validate_python(payload)

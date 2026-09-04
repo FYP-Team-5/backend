@@ -47,7 +47,7 @@ def test_staff_registration_requires_bootstrap_key(identity_service: IdentitySer
         asyncio.run(identity_service.register_staff(request, "wrong-key"))
 
     staff = asyncio.run(identity_service.register_staff(request, "test-staff-registration-key"))
-    assert staff.role == "staff"
+    assert staff.role == "instructor"
 
 
 def test_authorization_and_inactive_account(identity_service: IdentityService) -> None:

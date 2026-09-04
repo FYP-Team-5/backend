@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -24,6 +23,11 @@ from app.dto import UserResponse
 from app.model import Staff, Student
 
 metadata = MetaData()
+
+STUDENT_ID_START = 1_000_001
+INSTRUCTOR_ID_START = 2_000_001
+STUDENT_ROLE = "student"
+INSTRUCTOR_ROLE = "instructor"
 
 users = Table(
     "users",
@@ -101,7 +105,7 @@ class PostgresUserRepository:
         return self._create(
             email=email,
             full_name=full_name,
-            role="student",
+            role=STUDENT_ROLE,
             institutional_number=student_number,
             password_hash=password_hash,
         )
@@ -117,7 +121,7 @@ class PostgresUserRepository:
         return self._create(
             email=email,
             full_name=full_name,
-            role="staff",
+            role=INSTRUCTOR_ROLE,
             institutional_number=staff_number,
             password_hash=password_hash,
         )
@@ -131,10 +135,10 @@ class PostgresUserRepository:
         institutional_number: str,
         password_hash: str,
     ) -> UserResponse:
-        user_id = str(uuid.uuid4())
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
+                user_id = self._next_user_id(connection, role)
                 connection.execute(
                     insert(users).values(
                         id=user_id,
@@ -147,7 +151,7 @@ class PostgresUserRepository:
                         updated_at=now,
                     )
                 )
-                if role == "student":
+                if role == STUDENT_ROLE:
                     connection.execute(
                         insert(student_profiles).values(
                             user_id=user_id,
@@ -168,6 +172,21 @@ class PostgresUserRepository:
         except SQLAlchemyError as exc:
             raise UserStoreError("Unable to create user.") from exc
         return self.get(user_id)[0]
+
+    @staticmethod
+    def _next_user_id(connection, role: str) -> str:
+        start = (
+            STUDENT_ID_START if role == STUDENT_ROLE else INSTRUCTOR_ID_START
+        )
+        existing_ids = connection.execute(
+            select(users.c.id).where(users.c.role == role)
+        ).scalars()
+        numeric_ids = [
+            int(value)
+            for value in existing_ids
+            if str(value).isdigit() and int(value) >= start
+        ]
+        return str(max(numeric_ids, default=start - 1) + 1)
 
     def get(self, user_id: str) -> tuple[UserResponse, str]:
         return self._get(users.c.id == user_id)
@@ -222,7 +241,7 @@ class PostgresUserRepository:
 
     @staticmethod
     def _profile_number(connection, row: RowMapping) -> str:
-        if row["role"] == "student":
+        if row["role"] == STUDENT_ROLE:
             value = connection.execute(
                 select(student_profiles.c.student_number).where(
                     student_profiles.c.user_id == row["id"]

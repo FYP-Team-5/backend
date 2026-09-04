@@ -28,7 +28,7 @@ class User(BaseModel):
     id: str = Field(pattern=USER_ID_PATTERN)
     email: str
     full_name: str
-    role: Literal["student", "staff"]
+    role: Literal["student", "instructor"]
     active: bool
     created_at: datetime
     updated_at: datetime
@@ -45,6 +45,6 @@ class Student(User):
 
 
 class Staff(User):
-    role: Literal["staff"] = "staff"
+    role: Literal["instructor"] = "instructor"
     staff_number: str = Field(pattern=INSTITUTIONAL_NUMBER_PATTERN)
 

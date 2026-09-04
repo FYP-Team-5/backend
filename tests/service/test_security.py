@@ -9,7 +9,7 @@ from app.service import InvalidTokenError, PasswordHasher, TokenManager
 def _student() -> Student:
     now = datetime.now(UTC)
     return Student(
-        id="60f1ec55-f74e-4924-a9ee-1d79f902f846",
+            id="1000001",
         email="student@example.edu",
         full_name="Test Student",
         student_number="S0001",
@@ -60,7 +60,7 @@ def test_token_round_trip_and_claims() -> None:
     token = manager.issue(_student(), "S0001")
     claims = manager.verify(token)
 
-    assert claims.sub == "60f1ec55-f74e-4924-a9ee-1d79f902f846"
+    assert claims.sub == "1000001"
     assert claims.role == "student"
     assert claims.institutional_number == "S0001"
     assert claims.aud == "assessment-services"

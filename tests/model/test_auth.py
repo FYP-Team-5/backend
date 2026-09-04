@@ -11,7 +11,7 @@ from app.service import TokenManager
 def test_token_subject_is_the_same_stable_user_id() -> None:
     now = datetime.now(UTC)
     student = Student(
-        id="60f1ec55-f74e-4924-a9ee-1d79f902f846",
+            id="1000001",
         email="student@example.edu",
         full_name="Student One",
         student_number="S0001",

@@ -177,7 +177,7 @@ class UserService:
         self,
         principal: UserResponse,
         *,
-        role: Literal["student", "staff"] | None = None,
+        role: Literal["student", "instructor"] | None = None,
     ) -> list[UserResponse]:
         return await self.core.list_users(principal, role=role)
 

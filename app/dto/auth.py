@@ -7,7 +7,7 @@ from app.model.identifiers import USER_ID_PATTERN
 
 class TokenClaims(BaseModel):
     sub: str = Field(pattern=USER_ID_PATTERN)
-    role: Literal["student", "staff"]
+    role: Literal["student", "instructor"]
     email: str
     institutional_number: str
     iss: str

@@ -24,6 +24,10 @@ def test_joined_profiles_support_student_and_staff_inheritance(
     loaded_staff, staff_hash = repository.get_by_email("staff@example.edu")
 
     assert isinstance(loaded_student, Student)
+    assert student.id == "1000001"
+    assert loaded_staff.id == "2000001"
+    assert student.id.isdigit() and loaded_staff.id.isdigit()
+    assert student.id != loaded_staff.id
     assert loaded_student.student_number == "S0001"
     assert student_hash == "student-hash"
     assert isinstance(loaded_staff, Staff)
