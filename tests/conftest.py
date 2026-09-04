@@ -1,14 +1,20 @@
 from collections.abc import Iterator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
-from app.db import PostgresUserRepository
+from app.db import (
+    PostgresGradingRepository,
+    PostgresRubricMetadataRepository,
+    PostgresUserRepository,
+    QdrantRubricChunkRepository,
+)
 from app.main import create_app
-from app.service import IdentityService
+from app.service import GradingService, IdentityService, LocalLLMClient
 
 
 @pytest.fixture
@@ -22,22 +28,34 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def repository() -> Iterator[PostgresUserRepository]:
+def engine() -> Iterator[Engine]:
+    """One engine shared by both repositories: anonymous in-memory SQLite
+    gives every separate engine its own private, empty database."""
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    store = PostgresUserRepository(engine=engine)
-    store.initialize()
     try:
-        yield store
+        yield engine
     finally:
-        store.close()
+        engine.dispose()
 
 
 @pytest.fixture
-def service(
+def repository(engine: Engine) -> PostgresUserRepository:
+    store = PostgresUserRepository(engine=engine)
+    store.initialize()
+    return store
+
+
+@pytest.fixture
+def grading_repository(engine: Engine) -> PostgresGradingRepository:
+    return PostgresGradingRepository(engine=engine)
+
+
+@pytest.fixture
+def identity_service(
     settings: Settings,
     repository: PostgresUserRepository,
 ) -> IdentityService:
@@ -45,6 +63,61 @@ def service(
 
 
 @pytest.fixture
-def client(settings: Settings, service: IdentityService) -> Iterator[TestClient]:
-    with TestClient(create_app(settings=settings, identity_service=service)) as test_client:
+def service(identity_service: IdentityService) -> IdentityService:
+    """Alias for tests/service/test_user_service.py."""
+    return identity_service
+
+
+@pytest.fixture
+def rubric_store() -> PostgresRubricMetadataRepository:
+    store = MagicMock(spec=PostgresRubricMetadataRepository)
+    store.health.return_value = True
+    return store
+
+
+@pytest.fixture
+def chunk_store() -> QdrantRubricChunkRepository:
+    store = MagicMock(spec=QdrantRubricChunkRepository)
+    store.health.return_value = True
+    return store
+
+
+@pytest.fixture
+def llm_client() -> LocalLLMClient:
+    client = MagicMock(spec=LocalLLMClient)
+    client.close = AsyncMock()
+    client.health = AsyncMock(return_value=True)
+    client.grade = AsyncMock()
+    return client
+
+
+@pytest.fixture
+def grading_service(
+    settings: Settings,
+    grading_repository: PostgresGradingRepository,
+    rubric_store: PostgresRubricMetadataRepository,
+    chunk_store: QdrantRubricChunkRepository,
+    llm_client: LocalLLMClient,
+) -> GradingService:
+    return GradingService(
+        settings,
+        rubric_store=rubric_store,
+        grading_store=grading_repository,
+        chunk_store=chunk_store,
+        llm_client=llm_client,
+    )
+
+
+@pytest.fixture
+def client(
+    settings: Settings,
+    identity_service: IdentityService,
+    grading_service: GradingService,
+) -> Iterator[TestClient]:
+    app = create_app(
+        settings=settings,
+        identity_service=identity_service,
+        grading_service=grading_service,
+    )
+    with TestClient(app) as test_client:
         yield test_client
