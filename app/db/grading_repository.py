@@ -26,7 +26,16 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.dto import RubricCreate, TestCreate
-from app.model import Attempt, Course, Criteria, CriteriaMet, Question, Response, Rubric, Test
+from app.model import (
+    Attempt,
+    Course,
+    Criteria,
+    CriteriaMet,
+    Question,
+    Response,
+    Rubric,
+    Test,
+)
 
 grading_metadata = MetaData()
 
