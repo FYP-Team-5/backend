@@ -23,9 +23,10 @@ def test_grade_uses_openai_contract_and_parses_structured_result() -> None:
                                 "content": json.dumps(
                                     {
                                         "score": 4,
-                                        "max_score": 5,
                                         "feedback": "Good work.",
-                                        "criteria": [],
+                                        "criteria_met": [
+                                            {"criteria_id": "c1", "is_met": True}
+                                        ],
                                     }
                                 )
                             }
@@ -44,7 +45,9 @@ def test_grade_uses_openai_contract_and_parses_structured_result() -> None:
         result = await client.grade(system_prompt="system", user_prompt="user")
 
         assert result.score == 4
-        assert result.max_score == 5
+        assert result.feedback == "Good work."
+        assert result.criteria_met[0].criteria_id == "c1"
+        assert result.criteria_met[0].is_met is True
         await http_client.aclose()
 
     asyncio.run(exercise())
@@ -61,8 +64,7 @@ def test_grade_rejects_invalid_structured_result() -> None:
                             {
                                 "message": {
                                     "content": (
-                                        '{"score": 8, "max_score": 5, '
-                                        '"feedback": "bad"}'
+                                        '{"score": -1, "feedback": "bad"}'
                                     )
                                 }
                             }

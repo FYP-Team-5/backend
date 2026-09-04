@@ -2,11 +2,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.db import AttemptLimitExceededError, PostgresGradingRepository
-from app.dto import ExamCreate, QuestionCreate
-
-pytestmark = pytest.mark.skip(
-    reason="Legacy tests use the replaced caller-supplied course ID contract."
-)
+from app.dto import CriteriaCreate, QuestionCreate, RubricCreate, TestCreate
 
 
 def make_repository() -> PostgresGradingRepository:
@@ -17,25 +13,21 @@ def make_repository() -> PostgresGradingRepository:
     return repository
 
 
-def make_exam(max_attempts: int = 1) -> ExamCreate:
-    return ExamCreate(
-        id="history-midterm",
-        title="History midterm",
-        type="exam",
+def make_test_request(*, max_attempts: int = 1) -> TestCreate:
+    return TestCreate(
+        test_name="History midterm",
         max_attempts=max_attempts,
-        rubric_id="history-midterm-rubric-v1",
         questions=[
             QuestionCreate(
-                id="history-midterm-q1",
                 prompt="Explain the primary cause.",
                 max_score=10,
-                rubric_chunk_indexes=[0, 1],
-            ),
-            QuestionCreate(
-                id="history-midterm-q2",
-                prompt="Evaluate the evidence.",
-                max_score=5,
-                rubric_chunk_indexes=[2],
+                score_increment=0.5,
+                rubric=RubricCreate(
+                    criteria=[
+                        CriteriaCreate(description="Identifies the primary cause.", score=6),
+                        CriteriaCreate(description="Supports the claim with evidence.", score=4),
+                    ]
+                ),
             ),
         ],
     )
@@ -43,103 +35,136 @@ def make_exam(max_attempts: int = 1) -> ExamCreate:
 
 def test_catalog_attempt_and_grade_round_trip() -> None:
     repository = make_repository()
-    repository.create_course("HIST-101", "History")
-    exam = repository.create_exam("HIST-101", make_exam(max_attempts=2))
+    course = repository.create_course("HIST-101", "History")
+    test = repository.create_test(course.id, make_test_request(max_attempts=2))
 
-    assert exam.course_id == "HIST-101"
-    assert [question.position for question in exam.questions] == [0, 1]
+    assert test.course_id == course.id
+    assert [question.position for question in test.questions] == [0]
+    question = test.questions[0]
+    assert len(question.rubric.criteria) == 2
 
-    attempt = repository.create_attempt(
-        exam_id=exam.id,
-        student_id="student-1",
-        rubric_id=exam.rubric_id,
-        rubric_version="1",
-    )
+    attempt = repository.create_attempt(test_id=test.id, user_id="student-1")
     response_id = repository.save_response(
         attempt.id,
-        "history-midterm-q1",
+        question.id,
         "Economic pressure was the main cause.",
     )
-    repository.save_grade(
-        attempt_id=attempt.id,
+    repository.save_response_grade(
         response_id=response_id,
-        question_id="history-midterm-q1",
         score=8,
-        max_score=10,
         feedback="Good explanation.",
-        criteria=[{"criterion": "Accuracy", "score": 8, "max_score": 10}],
-        rubric_id=exam.rubric_id,
-        rubric_version="1",
-        rubric_chunk_ids=["chunk-1", "chunk-2"],
-        llm_model="grader",
-        prompt_version="2.0",
+        criteria_met_results=[
+            {"criteria_id": question.rubric.criteria[0].id, "is_met": True},
+            {"criteria_id": question.rubric.criteria[1].id, "is_met": False},
+        ],
     )
 
-    grades = repository.list_grades(attempt.id)
+    responses = repository.list_responses(attempt.id)
     completed = repository.mark_attempt_graded(attempt.id)
 
-    assert grades[0].question_id == "history-midterm-q1"
-    assert grades[0].score == 8
-    assert grades[0].rubric_chunk_ids == ["chunk-1", "chunk-2"]
+    assert responses[0].question_id == question.id
+    assert responses[0].score == 8
+    assert {item.criteria_id for item in responses[0].criteria_met} == {
+        question.rubric.criteria[0].id,
+        question.rubric.criteria[1].id,
+    }
     assert completed.status == "graded"
 
 
-def test_attempt_limit_is_enforced_per_student_and_exam() -> None:
+def test_attempt_limit_is_enforced_per_user_and_test() -> None:
     repository = make_repository()
-    repository.create_course("HIST-101", "History")
-    exam = repository.create_exam("HIST-101", make_exam(max_attempts=1))
-    repository.create_attempt(
-        exam_id=exam.id,
-        student_id="student-1",
-        rubric_id=exam.rubric_id,
-        rubric_version="1",
-    )
+    course = repository.create_course("HIST-101", "History")
+    test = repository.create_test(course.id, make_test_request(max_attempts=1))
+    repository.create_attempt(test_id=test.id, user_id="student-1")
 
     with pytest.raises(AttemptLimitExceededError, match="allows 1 attempt"):
-        repository.create_attempt(
-            exam_id=exam.id,
-            student_id="student-1",
-            rubric_id=exam.rubric_id,
-            rubric_version="1",
-        )
+        repository.create_attempt(test_id=test.id, user_id="student-1")
 
-    other_student = repository.create_attempt(
-        exam_id=exam.id,
-        student_id="student-2",
-        rubric_id=exam.rubric_id,
-        rubric_version="1",
-    )
+    other_student = repository.create_attempt(test_id=test.id, user_id="student-2")
     assert other_student.attempt_number == 1
 
 
-def test_question_chunk_mapping_can_be_updated_after_rubric_processing() -> None:
+def test_each_question_gets_its_own_rubric() -> None:
     repository = make_repository()
-    repository.create_course("HIST-101", "History")
-    repository.create_exam("HIST-101", make_exam())
-
-    question = repository.update_question_chunk_indexes(
-        "history-midterm",
-        "history-midterm-q1",
-        [3, 4],
+    course = repository.create_course("HIST-101", "History")
+    request = TestCreate(
+        test_name="History midterm",
+        max_attempts=1,
+        questions=[
+            QuestionCreate(
+                prompt="Explain the primary cause.",
+                max_score=10,
+                score_increment=0.5,
+                rubric=RubricCreate(criteria=[CriteriaCreate(description="Accuracy", score=10)]),
+            ),
+            QuestionCreate(
+                prompt="Evaluate the evidence.",
+                max_score=5,
+                score_increment=0.5,
+                rubric=RubricCreate(criteria=[CriteriaCreate(description="Evidence", score=5)]),
+            ),
+        ],
     )
 
-    assert question.rubric_chunk_indexes == [3, 4]
+    test = repository.create_test(course.id, request)
+
+    assert test.questions[0].rubric.id != test.questions[1].rubric.id
+    assert [item.description for item in test.questions[0].rubric.criteria] == ["Accuracy"]
+    assert [item.description for item in test.questions[1].rubric.criteria] == ["Evidence"]
 
 
-def test_catalog_lists_rubric_activation_and_attempt_listing() -> None:
+def test_question_can_be_created_without_a_rubric_and_assigned_one_later() -> None:
     repository = make_repository()
-    repository.create_course("HIST-101", "History")
-    exam = repository.create_exam("HIST-101", make_exam(max_attempts=2))
-
-    updated = repository.update_exam_rubric(exam.id, "history-midterm-rubric-v2")
-    attempt = repository.create_attempt(
-        exam_id=exam.id,
-        student_id="student-1",
-        rubric_id=updated.rubric_id,
-        rubric_version="2",
+    course = repository.create_course("HIST-101", "History")
+    request = TestCreate(
+        test_name="History midterm",
+        max_attempts=1,
+        questions=[
+            QuestionCreate(prompt="Explain the primary cause.", max_score=10, score_increment=0.5),
+        ],
     )
 
-    assert [course.id for course in repository.list_courses()] == ["HIST-101"]
-    assert [item.id for item in repository.list_exams("HIST-101")] == [exam.id]
-    assert updated.rubric_id == "history-midterm-rubric-v2"
-    assert repository.list_attempts(exam.id, "student-1") == [attempt]
+    test = repository.create_test(course.id, request)
+    question = test.questions[0]
+    assert question.rubric is None
+
+    updated_question = repository.set_question_rubric(
+        test.id,
+        question.id,
+        RubricCreate(criteria=[CriteriaCreate(description="Accuracy", score=10)]),
+    )
+
+    assert updated_question.rubric is not None
+    assert [item.description for item in updated_question.rubric.criteria] == ["Accuracy"]
+    refetched = repository.get_test(test.id)
+    assert refetched.questions[0].rubric.criteria[0].description == "Accuracy"
+
+
+def test_setting_a_new_rubric_replaces_the_old_one() -> None:
+    repository = make_repository()
+    course = repository.create_course("HIST-101", "History")
+    test = repository.create_test(course.id, make_test_request())
+    question = test.questions[0]
+    old_rubric_id = question.rubric.id
+
+    updated_question = repository.set_question_rubric(
+        test.id,
+        question.id,
+        RubricCreate(criteria=[CriteriaCreate(description="Replacement criterion", score=10)]),
+    )
+
+    assert updated_question.rubric.id != old_rubric_id
+    assert [item.description for item in updated_question.rubric.criteria] == [
+        "Replacement criterion"
+    ]
+
+
+def test_catalog_lists_courses_tests_and_attempts() -> None:
+    repository = make_repository()
+    course = repository.create_course("HIST-101", "History")
+    test = repository.create_test(course.id, make_test_request(max_attempts=2))
+    attempt = repository.create_attempt(test_id=test.id, user_id="student-1")
+
+    assert [item.id for item in repository.list_courses()] == [course.id]
+    assert [item.id for item in repository.list_tests(course.id)] == [test.id]
+    assert repository.list_attempts(test.id, "student-1") == [attempt]

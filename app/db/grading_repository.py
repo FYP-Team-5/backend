@@ -4,20 +4,19 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
-    JSON,
+    Boolean,
     Column,
     DateTime,
     Float,
     ForeignKey,
-    ForeignKeyConstraint,
     Integer,
     MetaData,
-    PrimaryKeyConstraint,
     String,
     Table,
     Text,
     UniqueConstraint,
     create_engine,
+    delete,
     func,
     insert,
     select,
@@ -26,8 +25,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.dto import ExamCreate
-from app.model import Attempt, Course, Exam, Question, QuestionGrade
+from app.dto import RubricCreate, TestCreate
+from app.model import Attempt, Course, Criteria, CriteriaMet, Question, Response, Rubric, Test
 
 grading_metadata = MetaData()
 
@@ -36,56 +35,64 @@ courses = Table(
     grading_metadata,
     Column("id", String(128), primary_key=True),
     Column("course_code", String(128), nullable=False),
-    Column("title", String(300), nullable=False),
+    Column("course_name", String(300), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
-exams = Table(
-    "grading_exams",
+tests = Table(
+    "grading_tests",
     grading_metadata,
     Column("id", String(128), primary_key=True),
     Column("course_id", ForeignKey("grading_courses.id"), nullable=False, index=True),
-    Column("title", String(300), nullable=False),
-    Column("type", String(16), nullable=False),
+    Column("test_name", String(300), nullable=False),
     Column("max_attempts", Integer, nullable=False),
-    Column("rubric_id", String(128), nullable=True, unique=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+rubrics = Table(
+    "grading_rubrics",
+    grading_metadata,
+    Column("id", String(128), primary_key=True),
+)
+
+criteria = Table(
+    "grading_criteria",
+    grading_metadata,
+    Column("id", String(128), primary_key=True),
+    Column("rubric_id", ForeignKey("grading_rubrics.id"), nullable=False, index=True),
+    Column("description", Text, nullable=False),
+    Column("score", Float, nullable=False),
 )
 
 questions = Table(
     "grading_questions",
     grading_metadata,
-    # id is only unique *within an exam* (matching the instructor-supplied CSV
-    # question_id), not globally — two different exams may both have a "Q001".
-    Column("id", String(128), nullable=False),
-    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
+    Column("id", String(128), primary_key=True),
+    Column("test_id", ForeignKey("grading_tests.id"), nullable=False, index=True),
     Column("position", Integer, nullable=False),
     Column("prompt", Text, nullable=False),
     Column("max_score", Float, nullable=False),
-    Column("criteria", JSON, nullable=False),
-    Column("rubric_chunk_indexes", JSON, nullable=False),
-    PrimaryKeyConstraint("exam_id", "id", name="pk_grading_questions"),
-    UniqueConstraint("exam_id", "position", name="uq_grading_question_position"),
+    Column("score_increment", Float, nullable=False),
+    Column("rubric_id", ForeignKey("grading_rubrics.id"), nullable=True, unique=True),
+    UniqueConstraint("test_id", "position", name="uq_grading_question_position"),
 )
 
 attempts = Table(
     "grading_attempts",
     grading_metadata,
     Column("id", String(36), primary_key=True),
-    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
-    Column("student_id", String(128), nullable=False, index=True),
+    Column("test_id", ForeignKey("grading_tests.id"), nullable=False, index=True),
+    Column("user_id", String(128), nullable=False, index=True),
     Column("attempt_number", Integer, nullable=False),
     Column("status", String(32), nullable=False),
-    Column("rubric_id", String(128), nullable=False),
-    Column("rubric_version", String(64), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("graded_at", DateTime(timezone=True), nullable=True),
     Column("error", Text, nullable=True),
     UniqueConstraint(
-        "exam_id",
-        "student_id",
+        "test_id",
+        "user_id",
         "attempt_number",
-        name="uq_grading_student_exam_attempt",
+        name="uq_grading_user_test_attempt",
     ),
 )
 
@@ -94,41 +101,22 @@ responses = Table(
     grading_metadata,
     Column("id", String(36), primary_key=True),
     Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
-    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
-    Column("question_id", String(128), nullable=False),
+    Column("question_id", ForeignKey("grading_questions.id"), nullable=False, index=True),
     Column("answer", Text, nullable=False),
+    Column("score", Float, nullable=True),
+    Column("feedback", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    ForeignKeyConstraint(
-        ["exam_id", "question_id"],
-        ["grading_questions.exam_id", "grading_questions.id"],
-    ),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
 )
 
-grades = Table(
-    "grading_question_grades",
+criteria_met = Table(
+    "grading_criteria_met",
     grading_metadata,
     Column("id", String(36), primary_key=True),
-    Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
-    Column("response_id", ForeignKey("grading_responses.id"), nullable=False),
-    Column("exam_id", ForeignKey("grading_exams.id"), nullable=False, index=True),
-    Column("question_id", String(128), nullable=False),
-    Column("score", Float, nullable=False),
-    Column("max_score", Float, nullable=False),
-    Column("feedback", Text, nullable=False),
-    Column("criteria", JSON, nullable=False),
-    Column("rubric_id", String(128), nullable=False),
-    Column("rubric_version", String(64), nullable=False),
-    Column("rubric_chunk_ids", JSON, nullable=False),
-    Column("llm_model", String(255), nullable=False),
-    Column("prompt_version", String(64), nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-    ForeignKeyConstraint(
-        ["exam_id", "question_id"],
-        ["grading_questions.exam_id", "grading_questions.id"],
-    ),
-    UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_grade"),
+    Column("response_id", ForeignKey("grading_responses.id"), nullable=False, index=True),
+    Column("criteria_id", ForeignKey("grading_criteria.id"), nullable=False, index=True),
+    Column("is_met", Boolean, nullable=False),
 )
 
 
@@ -177,14 +165,10 @@ class PostgresGradingRepository:
         except SQLAlchemyError:
             return False
 
-    def create_course(self, course_code: str, title: str) -> Course:
+    def create_course(self, course_code: str, course_name: str) -> Course:
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
-                # Course ids are auto-incremented, one higher than the current max
-                # *numeric* id. Computed in Python rather than SQL CAST so that
-                # any pre-existing non-numeric ids (e.g. from before this change)
-                # are simply ignored instead of raising a DB-level cast error.
                 existing_ids = connection.execute(select(courses.c.id)).scalars().all()
                 numeric_ids = [int(value) for value in existing_ids if value.isdigit()]
                 course_id = str(max(numeric_ids, default=0) + 1)
@@ -192,7 +176,7 @@ class PostgresGradingRepository:
                     insert(courses).values(
                         id=course_id,
                         course_code=course_code,
-                        title=title,
+                        course_name=course_name,
                         created_at=now,
                     )
                 )
@@ -201,7 +185,7 @@ class PostgresGradingRepository:
         return Course(
             id=course_id,
             course_code=course_code,
-            title=title,
+            course_name=course_name,
             created_at=now,
         )
 
@@ -225,172 +209,207 @@ class PostgresGradingRepository:
             )
         return [Course.model_validate(dict(row)) for row in rows]
 
-    def create_exam(self, course_id: str, request: ExamCreate) -> Exam:
+    def create_test(self, course_id: str, request: TestCreate) -> Test:
         now = datetime.now(UTC)
-        exam_id = str(uuid.uuid4())
+        test_id = str(uuid.uuid4())
+        question_rubric_ids = [
+            str(uuid.uuid4()) if question.rubric is not None else None
+            for question in request.questions
+        ]
+        rubric_ids_to_create = [
+            rubric_id for rubric_id in question_rubric_ids if rubric_id is not None
+        ]
         try:
             with self.engine.begin() as connection:
                 if not self._course_exists(connection, course_id):
                     raise GradingRecordNotFoundError(course_id)
                 connection.execute(
-                    insert(exams).values(
-                        id=exam_id,
+                    insert(tests).values(
+                        id=test_id,
                         course_id=course_id,
-                        title=request.title,
-                        type=request.type,
+                        test_name=request.test_name,
                         max_attempts=request.max_attempts,
-                        rubric_id=request.rubric_id,
                         created_at=now,
                     )
                 )
+                if rubric_ids_to_create:
+                    connection.execute(
+                        insert(rubrics),
+                        [{"id": rubric_id} for rubric_id in rubric_ids_to_create],
+                    )
+                criteria_rows = [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "rubric_id": rubric_id,
+                        "description": item.description,
+                        "score": item.score,
+                    }
+                    for rubric_id, question in zip(question_rubric_ids, request.questions)
+                    if rubric_id is not None
+                    for item in question.rubric.criteria
+                ]
+                if criteria_rows:
+                    connection.execute(insert(criteria), criteria_rows)
                 connection.execute(
                     insert(questions),
                     [
                         {
-                            "id": question.id,
-                            "exam_id": exam_id,
+                            "id": str(uuid.uuid4()),
+                            "test_id": test_id,
                             "position": position,
                             "prompt": question.prompt,
                             "max_score": question.max_score,
-                            "criteria": question.criteria,
-                            "rubric_chunk_indexes": question.rubric_chunk_indexes,
+                            "score_increment": question.score_increment,
+                            "rubric_id": rubric_id,
                         }
-                        for position, question in enumerate(request.questions)
+                        for position, (rubric_id, question) in enumerate(
+                            zip(question_rubric_ids, request.questions)
+                        )
                     ],
                 )
         except IntegrityError as exc:
-            raise GradingConflictError(
-                "Exam, rubric, or question identifiers already exist."
-            ) from exc
-        return self.get_exam(exam_id)
+            raise GradingConflictError("Test identifiers already exist.") from exc
+        return self.get_test(test_id)
 
-    def get_exam(self, exam_id: str) -> Exam:
+    def set_question_rubric(
+        self, test_id: str, question_id: str, request: RubricCreate
+    ) -> Question:
+        new_rubric_id = str(uuid.uuid4())
+        try:
+            with self.engine.begin() as connection:
+                question_row = (
+                    connection.execute(
+                        select(questions)
+                        .where(questions.c.id == question_id, questions.c.test_id == test_id)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if question_row is None:
+                    raise GradingRecordNotFoundError(question_id)
+                old_rubric_id = question_row["rubric_id"]
+                connection.execute(insert(rubrics).values(id=new_rubric_id))
+                connection.execute(
+                    insert(criteria),
+                    [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "rubric_id": new_rubric_id,
+                            "description": item.description,
+                            "score": item.score,
+                        }
+                        for item in request.criteria
+                    ],
+                )
+                connection.execute(
+                    update(questions)
+                    .where(questions.c.id == question_id)
+                    .values(rubric_id=new_rubric_id)
+                )
+                if old_rubric_id is not None:
+                    connection.execute(
+                        delete(criteria).where(criteria.c.rubric_id == old_rubric_id)
+                    )
+                    connection.execute(delete(rubrics).where(rubrics.c.id == old_rubric_id))
+        except IntegrityError as exc:
+            raise GradingConflictError("Rubric identifiers already exist.") from exc
+        return self._get_question(question_id)
+
+    def get_test(self, test_id: str) -> Test:
         try:
             with self.engine.connect() as connection:
-                exam_row = (
-                    connection.execute(select(exams).where(exams.c.id == exam_id))
+                test_row = (
+                    connection.execute(select(tests).where(tests.c.id == test_id))
                     .mappings()
                     .first()
                 )
                 question_rows = (
                     connection.execute(
                         select(questions)
-                        .where(questions.c.exam_id == exam_id)
+                        .where(questions.c.test_id == test_id)
                         .order_by(questions.c.position)
                     )
                     .mappings()
                     .all()
                 )
+                rubric_ids = [
+                    row["rubric_id"] for row in question_rows if row["rubric_id"] is not None
+                ]
+                criteria_rows = (
+                    connection.execute(
+                        select(criteria).where(criteria.c.rubric_id.in_(rubric_ids))
+                    )
+                    .mappings()
+                    .all()
+                    if rubric_ids
+                    else []
+                )
         except SQLAlchemyError as exc:
-            raise GradingStoreError("Unable to read exam data.") from exc
-        if exam_row is None:
-            raise GradingRecordNotFoundError(exam_id)
-        return self._to_exam(exam_row, question_rows)
+            raise GradingStoreError("Unable to read test data.") from exc
+        if test_row is None:
+            raise GradingRecordNotFoundError(test_id)
+        criteria_by_rubric: dict[str, list[RowMapping]] = {}
+        for row in criteria_rows:
+            criteria_by_rubric.setdefault(row["rubric_id"], []).append(row)
+        return self._to_test(test_row, question_rows, criteria_by_rubric)
 
-    def list_exams(self, course_id: str) -> list[Exam]:
+    def list_tests(self, course_id: str) -> list[Test]:
         if not self._course_exists_for_read(course_id):
             raise GradingRecordNotFoundError(course_id)
         with self.engine.connect() as connection:
             ids = (
                 connection.execute(
-                    select(exams.c.id)
-                    .where(exams.c.course_id == course_id)
-                    .order_by(exams.c.created_at)
+                    select(tests.c.id)
+                    .where(tests.c.course_id == course_id)
+                    .order_by(tests.c.created_at)
                 )
                 .scalars()
                 .all()
             )
-        return [self.get_exam(exam_id) for exam_id in ids]
+        return [self.get_test(test_id) for test_id in ids]
 
-    def update_exam_rubric(self, exam_id: str, rubric_id: str) -> Exam:
-        try:
-            with self.engine.begin() as connection:
-                result = connection.execute(
-                    update(exams)
-                    .where(exams.c.id == exam_id)
-                    .values(rubric_id=rubric_id)
-                )
-        except IntegrityError as exc:
-            raise GradingConflictError(
-                f"Rubric '{rubric_id}' is already assigned to another exam."
-            ) from exc
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(exam_id)
-        return self.get_exam(exam_id)
-
-    def update_question_chunk_indexes(
-        self,
-        exam_id: str,
-        question_id: str,
-        chunk_indexes: list[int],
-    ) -> Question:
-        statement = (
-            update(questions)
-            .where(questions.c.id == question_id, questions.c.exam_id == exam_id)
-            .values(rubric_chunk_indexes=chunk_indexes)
-        )
-        with self.engine.begin() as connection:
-            result = connection.execute(statement)
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(question_id)
-        return next(
-            question
-            for question in self.get_exam(exam_id).questions
-            if question.id == question_id
-        )
-
-    def create_attempt(
-        self,
-        *,
-        exam_id: str,
-        student_id: str,
-        rubric_id: str,
-        rubric_version: str,
-    ) -> Attempt:
+    def create_attempt(self, *, test_id: str, user_id: str) -> Attempt:
         now = datetime.now(UTC)
         attempt_id = str(uuid.uuid4())
         try:
             with self.engine.begin() as connection:
-                exam_row = (
+                test_row = (
                     connection.execute(
-                        select(exams).where(exams.c.id == exam_id).with_for_update()
+                        select(tests).where(tests.c.id == test_id).with_for_update()
                     )
                     .mappings()
                     .first()
                 )
-                if exam_row is None:
-                    raise GradingRecordNotFoundError(exam_id)
+                if test_row is None:
+                    raise GradingRecordNotFoundError(test_id)
                 used = connection.execute(
                     select(func.count())
                     .select_from(attempts)
                     .where(
-                        attempts.c.exam_id == exam_id,
-                        attempts.c.student_id == student_id,
+                        attempts.c.test_id == test_id,
+                        attempts.c.user_id == user_id,
                     )
                 ).scalar_one()
-                if used >= exam_row["max_attempts"]:
+                if used >= test_row["max_attempts"]:
                     raise AttemptLimitExceededError(
-                        f"Exam '{exam_id}' allows {exam_row['max_attempts']} attempt(s)."
+                        f"Test '{test_id}' allows {test_row['max_attempts']} attempt(s)."
                     )
                 attempt_number = used + 1
                 connection.execute(
                     insert(attempts).values(
                         id=attempt_id,
-                        exam_id=exam_id,
-                        student_id=student_id,
+                        test_id=test_id,
+                        user_id=user_id,
                         attempt_number=attempt_number,
                         status="in_progress",
-                        rubric_id=rubric_id,
-                        rubric_version=rubric_version,
                         started_at=now,
                         graded_at=None,
                         error=None,
                     )
                 )
         except IntegrityError as exc:
-            raise GradingConflictError(
-                "Concurrent attempt creation conflicted."
-            ) from exc
+            raise GradingConflictError("Concurrent attempt creation conflicted.") from exc
         return self.get_attempt(attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Attempt:
@@ -409,12 +428,12 @@ class PostgresGradingRepository:
             raise GradingRecordNotFoundError(attempt_id)
         return Attempt.model_validate(dict(row))
 
-    def list_attempts(self, exam_id: str, student_id: str) -> list[Attempt]:
+    def list_attempts(self, test_id: str, user_id: str) -> list[Attempt]:
         statement = (
             select(attempts)
             .where(
-                attempts.c.exam_id == exam_id,
-                attempts.c.student_id == student_id,
+                attempts.c.test_id == test_id,
+                attempts.c.user_id == user_id,
             )
             .order_by(attempts.c.attempt_number)
         )
@@ -422,9 +441,7 @@ class PostgresGradingRepository:
             rows = connection.execute(statement).mappings().all()
         return [Attempt.model_validate(dict(row)) for row in rows]
 
-    def save_response(
-        self, attempt_id: str, exam_id: str, question_id: str, answer: str
-    ) -> str:
+    def save_response(self, attempt_id: str, question_id: str, answer: str) -> str:
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
             row = connection.execute(
@@ -439,9 +456,10 @@ class PostgresGradingRepository:
                     insert(responses).values(
                         id=response_id,
                         attempt_id=attempt_id,
-                        exam_id=exam_id,
                         question_id=question_id,
                         answer=answer,
+                        score=None,
+                        feedback=None,
                         created_at=now,
                         updated_at=now,
                     )
@@ -455,83 +473,64 @@ class PostgresGradingRepository:
                 )
         return response_id
 
-    def save_grade(
+    def save_response_grade(
         self,
         *,
-        attempt_id: str,
-        exam_id: str,
         response_id: str,
-        question_id: str,
         score: float,
-        max_score: float,
         feedback: str,
-        criteria: list[dict],
-        rubric_id: str,
-        rubric_version: str,
-        rubric_chunk_ids: list[str],
-        llm_model: str,
-        prompt_version: str,
+        criteria_met_results: list[dict],
     ) -> None:
         now = datetime.now(UTC)
-        values = {
-            "response_id": response_id,
-            "score": score,
-            "max_score": max_score,
-            "feedback": feedback,
-            "criteria": criteria,
-            "rubric_id": rubric_id,
-            "rubric_version": rubric_version,
-            "rubric_chunk_ids": rubric_chunk_ids,
-            "llm_model": llm_model,
-            "prompt_version": prompt_version,
-            "created_at": now,
-        }
         with self.engine.begin() as connection:
-            row = connection.execute(
-                select(grades.c.id).where(
-                    grades.c.attempt_id == attempt_id,
-                    grades.c.question_id == question_id,
-                )
-            ).first()
-            if row is None:
-                connection.execute(
-                    insert(grades).values(
-                        id=str(uuid.uuid4()),
-                        attempt_id=attempt_id,
-                        exam_id=exam_id,
-                        question_id=question_id,
-                        **values,
-                    )
-                )
-            else:
-                connection.execute(
-                    update(grades).where(grades.c.id == row[0]).values(**values)
-                )
-
-    def list_grades(self, attempt_id: str) -> list[QuestionGrade]:
-        statement = (
-            select(grades, questions.c.position)
-            .join(
-                questions,
-                (questions.c.id == grades.c.question_id)
-                & (questions.c.exam_id == grades.c.exam_id),
+            result = connection.execute(
+                update(responses)
+                .where(responses.c.id == response_id)
+                .values(score=score, feedback=feedback, updated_at=now)
             )
-            .where(grades.c.attempt_id == attempt_id)
+            if result.rowcount == 0:
+                raise GradingRecordNotFoundError(response_id)
+            connection.execute(
+                delete(criteria_met).where(criteria_met.c.response_id == response_id)
+            )
+            connection.execute(
+                insert(criteria_met),
+                [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "response_id": response_id,
+                        "criteria_id": item["criteria_id"],
+                        "is_met": item["is_met"],
+                    }
+                    for item in criteria_met_results
+                ],
+            )
+
+    def list_responses(self, attempt_id: str) -> list[Response]:
+        statement = (
+            select(responses, questions.c.position)
+            .join(questions, questions.c.id == responses.c.question_id)
+            .where(responses.c.attempt_id == attempt_id, responses.c.score.isnot(None))
             .order_by(questions.c.position)
         )
         with self.engine.connect() as connection:
-            rows = connection.execute(statement).mappings().all()
-        return [
-            QuestionGrade(
-                question_id=row["question_id"],
-                score=row["score"],
-                max_score=row["max_score"],
-                percentage=round(row["score"] / row["max_score"] * 100, 2),
-                feedback=row["feedback"],
-                criteria=row["criteria"],
-                rubric_chunk_ids=row["rubric_chunk_ids"],
+            response_rows = connection.execute(statement).mappings().all()
+            response_ids = [row["id"] for row in response_rows]
+            criteria_met_rows = (
+                connection.execute(
+                    select(criteria_met).where(criteria_met.c.response_id.in_(response_ids))
+                )
+                .mappings()
+                .all()
+                if response_ids
+                else []
             )
-            for row in rows
+        grouped: dict[str, list[RowMapping]] = {}
+        for row in criteria_met_rows:
+            grouped.setdefault(row["response_id"], []).append(row)
+        return [
+            self._to_response(row, grouped.get(row["id"], []))
+            for row in response_rows
         ]
 
     def mark_attempt_graded(self, attempt_id: str) -> Attempt:
@@ -580,9 +579,63 @@ class PostgresGradingRepository:
         with self.engine.connect() as connection:
             return self._course_exists(connection, course_id)
 
+    def _get_question(self, question_id: str) -> Question:
+        with self.engine.connect() as connection:
+            question_row = (
+                connection.execute(select(questions).where(questions.c.id == question_id))
+                .mappings()
+                .first()
+            )
+            if question_row is None:
+                raise GradingRecordNotFoundError(question_id)
+            criteria_rows = []
+            if question_row["rubric_id"] is not None:
+                criteria_rows = (
+                    connection.execute(
+                        select(criteria).where(criteria.c.rubric_id == question_row["rubric_id"])
+                    )
+                    .mappings()
+                    .all()
+                )
+        return self._to_question(question_row, criteria_rows)
+
     @staticmethod
-    def _to_exam(exam_row: RowMapping, question_rows: list[RowMapping]) -> Exam:
-        return Exam(
-            **dict(exam_row),
-            questions=[Question.model_validate(dict(row)) for row in question_rows],
+    def _to_question(question_row: RowMapping, criteria_rows: list[RowMapping]) -> Question:
+        rubric_id = question_row["rubric_id"]
+        rubric = (
+            Rubric(
+                id=rubric_id,
+                criteria=[Criteria.model_validate(dict(item)) for item in criteria_rows],
+            )
+            if rubric_id is not None
+            else None
+        )
+        return Question(
+            **{key: value for key, value in dict(question_row).items() if key != "rubric_id"},
+            rubric=rubric,
+        )
+
+    @classmethod
+    def _to_test(
+        cls,
+        test_row: RowMapping,
+        question_rows: list[RowMapping],
+        criteria_by_rubric: dict[str, list[RowMapping]],
+    ) -> Test:
+        return Test(
+            **dict(test_row),
+            questions=[
+                cls._to_question(row, criteria_by_rubric.get(row["rubric_id"], []))
+                for row in question_rows
+            ],
+        )
+
+    @staticmethod
+    def _to_response(
+        response_row: RowMapping, criteria_met_rows: list[RowMapping]
+    ) -> Response:
+        values = {key: value for key, value in dict(response_row).items() if key != "position"}
+        return Response(
+            **values,
+            criteria_met=[CriteriaMet.model_validate(dict(row)) for row in criteria_met_rows],
         )

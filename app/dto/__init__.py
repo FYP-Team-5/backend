@@ -1,15 +1,21 @@
 from app.dto.assessment import (
     AttemptGradeResponse,
     CourseCreate,
-    ExamCreate,
-    ExamRubricUpdate,
+    CriteriaCreate,
     GradeAttemptRequest,
     QuestionCreate,
     QuestionResponseSubmission,
-    RubricChunkMappingRequest,
+    RubricCreate,
+    TestCreate,
 )
 from app.dto.auth import TokenClaims
-from app.dto.grading import CriterionGrade, GradingResult, RetrievedRubricChunk
+from app.dto.grading import (
+    CriteriaGradingResult,
+    CriteriaMetResult,
+    CriterionGrade,
+    GradingResult,
+    RetrievedRubricChunk,
+)
 from app.dto.health import HealthResponse
 from app.dto.user import (
     LoginRequest,
@@ -23,9 +29,10 @@ from app.dto.user import (
 __all__ = [
     "AttemptGradeResponse",
     "CourseCreate",
+    "CriteriaCreate",
+    "CriteriaGradingResult",
+    "CriteriaMetResult",
     "CriterionGrade",
-    "ExamCreate",
-    "ExamRubricUpdate",
     "GradeAttemptRequest",
     "GradingResult",
     "HealthResponse",
@@ -33,9 +40,10 @@ __all__ = [
     "QuestionCreate",
     "QuestionResponseSubmission",
     "RetrievedRubricChunk",
-    "RubricChunkMappingRequest",
+    "RubricCreate",
     "StaffRegistration",
     "StudentRegistration",
+    "TestCreate",
     "TokenClaims",
     "TokenResponse",
     "UserResponse",

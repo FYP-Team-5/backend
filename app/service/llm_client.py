@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from app.dto import GradingResult
+from app.dto import CriteriaGradingResult
 
 JSON_CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 
@@ -62,7 +62,7 @@ class LocalLLMClient:
         except httpx.HTTPError:
             return False
 
-    async def grade(self, *, system_prompt: str, user_prompt: str) -> GradingResult:
+    async def grade(self, *, system_prompt: str, user_prompt: str) -> CriteriaGradingResult:
         try:
             response = await self._client.post(
                 self.url,
@@ -95,6 +95,6 @@ class LocalLLMClient:
         if match:
             content = match.group(1)
         try:
-            return GradingResult.model_validate_json(content)
+            return CriteriaGradingResult.model_validate_json(content)
         except ValidationError as exc:
             raise LLMResponseError(f"LLM returned an invalid grading result: {exc}") from exc

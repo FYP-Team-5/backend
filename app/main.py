@@ -10,8 +10,8 @@ from app.config import Settings, get_settings
 from app.controller import (
     auth_router,
     courses_router,
-    exams_router,
     health_router,
+    tests_router,
     users_router,
 )
 from app.service import (
@@ -38,7 +38,7 @@ OPENAPI_TAGS = [
     },
     {
         "name": "catalog",
-        "description": "Manage courses, exams, questions, and rubric mappings.",
+        "description": "Manage courses and tests, each with its own questions and rubrics.",
     },
     {
         "name": "attempts",
@@ -108,7 +108,7 @@ def create_app(
     app.include_router(auth_router, prefix=settings.api_v1_prefix)
     app.include_router(users_router, prefix=settings.api_v1_prefix)
     app.include_router(courses_router, prefix=settings.api_v1_prefix)
-    app.include_router(exams_router, prefix=settings.api_v1_prefix)
+    app.include_router(tests_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:

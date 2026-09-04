@@ -19,7 +19,6 @@ class Criteria(BaseModel):
 class Rubric(BaseModel):
     id: str
     criteria: list[Criteria]
-    created_at: datetime
 
 class Question(BaseModel):
     id: str
@@ -27,7 +26,7 @@ class Question(BaseModel):
     prompt: str
     max_score: float = Field(gt=0)
     score_increment: float = Field(gt=0)
-    rubric_id: str
+    rubric: Rubric | None = None
     position: int = Field(ge=0)
 
 class Test(BaseModel):

@@ -27,3 +27,12 @@ class GradingResult(BaseModel):
     def validate_score(self) -> "GradingResult":
         if self.score > self.max_score: raise ValueError("score cannot exceed max_score")
         return self
+
+class CriteriaMetResult(BaseModel):
+    criteria_id: str = Field(min_length=1)
+    is_met: bool
+
+class CriteriaGradingResult(BaseModel):
+    score: float = Field(ge=0)
+    feedback: str = Field(min_length=1)
+    criteria_met: list[CriteriaMetResult] = Field(default_factory=list)

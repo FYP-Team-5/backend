@@ -28,7 +28,6 @@ def test_health_and_openapi(client: TestClient) -> None:
     health = response.json()
     assert health["status"] == "ok"
     assert health["postgres"] == "ok"
-    assert health["qdrant"] == "ok"
     assert health["llm"] == "ok"
 
     schema = client.get("/openapi.json").json()

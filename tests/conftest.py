@@ -9,9 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import Settings
 from app.db import (
     PostgresGradingRepository,
-    PostgresRubricMetadataRepository,
     PostgresUserRepository,
-    QdrantRubricChunkRepository,
 )
 from app.main import create_app
 from app.service import GradingService, IdentityService, LocalLLMClient
@@ -69,20 +67,6 @@ def service(identity_service: IdentityService) -> IdentityService:
 
 
 @pytest.fixture
-def rubric_store() -> PostgresRubricMetadataRepository:
-    store = MagicMock(spec=PostgresRubricMetadataRepository)
-    store.health.return_value = True
-    return store
-
-
-@pytest.fixture
-def chunk_store() -> QdrantRubricChunkRepository:
-    store = MagicMock(spec=QdrantRubricChunkRepository)
-    store.health.return_value = True
-    return store
-
-
-@pytest.fixture
 def llm_client() -> LocalLLMClient:
     client = MagicMock(spec=LocalLLMClient)
     client.close = AsyncMock()
@@ -95,15 +79,11 @@ def llm_client() -> LocalLLMClient:
 def grading_service(
     settings: Settings,
     grading_repository: PostgresGradingRepository,
-    rubric_store: PostgresRubricMetadataRepository,
-    chunk_store: QdrantRubricChunkRepository,
     llm_client: LocalLLMClient,
 ) -> GradingService:
     return GradingService(
         settings,
-        rubric_store=rubric_store,
         grading_store=grading_repository,
-        chunk_store=chunk_store,
         llm_client=llm_client,
     )
 

@@ -4,12 +4,11 @@ from app.service.catalog_service import CatalogService
 from app.service.grading_service import (
     GradingService,
     IncompleteAttemptError,
+    LLMCriteriaMismatchError,
     LLMScoreScaleError,
-    RubricChunkMappingError,
-    RubricChunksMissingError,
-    RubricOwnershipError,
-    RubricProcessingIncompleteError,
+    RubricNotAssignedError,
     StudentAnswerTooLargeError,
+    UnknownQuestionError,
 )
 from app.service.llm_client import LLMResponseError, LLMServiceError, LocalLLMClient
 from app.service.security import InvalidTokenError, PasswordHasher, TokenManager
@@ -31,17 +30,16 @@ __all__ = [
     "IdentityService",
     "IncompleteAttemptError",
     "InvalidTokenError",
+    "LLMCriteriaMismatchError",
     "LLMResponseError",
     "LLMScoreScaleError",
     "LLMServiceError",
     "LocalLLMClient",
     "PasswordHasher",
-    "RubricChunkMappingError",
-    "RubricChunksMissingError",
-    "RubricOwnershipError",
-    "RubricProcessingIncompleteError",
+    "RubricNotAssignedError",
     "StaffRegistrationError",
     "StudentAnswerTooLargeError",
     "TokenManager",
+    "UnknownQuestionError",
     "UserService",
 ]

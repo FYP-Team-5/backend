@@ -67,11 +67,11 @@ async def require_api_key(
     ):
         raise HTTPException(status_code=401, detail="Missing or invalid API key.")
 
-async def require_student_id(
-    student_id: Annotated[
-        str, Header(alias="X-Student-ID", min_length=1, max_length=128)
+async def require_user_id(
+    user_id: Annotated[
+        str, Header(alias="X-User-ID", min_length=1, max_length=128)
     ],
 ) -> str:
-    if not ID_PATTERN.fullmatch(student_id):
-        raise HTTPException(status_code=422, detail="Invalid X-Student-ID header.")
-    return student_id
+    if not ID_PATTERN.fullmatch(user_id):
+        raise HTTPException(status_code=422, detail="Invalid X-User-ID header.")
+    return user_id

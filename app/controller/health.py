@@ -31,7 +31,6 @@ async def health(
     return HealthResponse(
         status="ok",
         postgres="ok",
-        qdrant="ok",
         llm="ok",
         model=grading_service.settings.llm_model,
     )

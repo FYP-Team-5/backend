@@ -1,9 +1,12 @@
 from app.model.assessment import (
     Attempt,
     Course,
-    Exam,
+    Criteria,
+    CriteriaMet,
     Question,
-    QuestionGrade,
+    Response,
+    Rubric,
+    Test,
 )
 from app.model.identifiers import (
     CROSS_SERVICE_ID_PATTERN,
@@ -18,12 +21,15 @@ __all__ = [
     "USER_ID_PATTERN",
     "Attempt",
     "Course",
-    "Exam",
+    "Criteria",
+    "CriteriaMet",
     "Question",
-    "QuestionGrade",
+    "Response",
+    "Rubric",
     "RubricMetadata",
     "Staff",
     "Student",
+    "Test",
     "User",
     "is_cross_service_id",
 ]

@@ -10,9 +10,9 @@ from app.db import (
 )
 from app.dto import (
     CourseCreate,
-    ExamCreate,
+    TestCreate,
 )
-from app.model import Course, Exam
+from app.model import Course, Test
 from app.service import (
     CatalogService,
 )
@@ -40,19 +40,19 @@ async def list_courses(
 
 
 @courses_router.post(
-    "/{course_id}/exams",
-    response_model=Exam,
+    "/{course_id}/tests",
+    response_model=Test,
     status_code=201,
 )
-async def create_exam(
+async def create_test(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
-    body: ExamCreate,
+    body: TestCreate,
     service: Annotated[CatalogService, Depends(get_catalog_service)],
-) -> Exam:
+) -> Test:
     try:
-        return await service.create_exam(course_id, body)
+        return await service.create_test(course_id, body)
     except GradingRecordNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Course not found.") from exc
+        raise HTTPException(status_code=404, detail="Course or rubric not found.") from exc
     except GradingConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except GradingStoreError as exc:
@@ -60,14 +60,14 @@ async def create_exam(
 
 
 @courses_router.get(
-    "/{course_id}/exams",
-    response_model=list[Exam],
+    "/{course_id}/tests",
+    response_model=list[Test],
 )
-async def list_exams(
+async def list_tests(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     service: Annotated[CatalogService, Depends(get_catalog_service)],
-) -> list[Exam]:
+) -> list[Test]:
     try:
-        return await service.list_exams(course_id)
+        return await service.list_tests(course_id)
     except GradingRecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Course not found.") from exc
