@@ -128,6 +128,7 @@ class GradingService:
     async def create_course(self, request: CourseCreate) -> Course:
         return await asyncio.to_thread(
             self.grading_store.create_course,
+            request.course_code,
             request.title,
         )
 

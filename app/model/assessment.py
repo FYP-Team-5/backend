@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class Course(BaseModel):
     id: str
+    course_code: str
     title: str
     created_at: datetime
 

@@ -7,6 +7,7 @@ from app.model.assessment import Attempt, QuestionGrade
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 
 class CourseCreate(BaseModel):
+    course_code: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=300)
 
 class QuestionCreate(BaseModel):

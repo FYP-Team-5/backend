@@ -35,6 +35,7 @@ courses = Table(
     "grading_courses",
     grading_metadata,
     Column("id", String(128), primary_key=True),
+    Column("course_code", String(128), nullable=False),
     Column("title", String(300), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
@@ -176,7 +177,7 @@ class PostgresGradingRepository:
         except SQLAlchemyError:
             return False
 
-    def create_course(self, title: str) -> Course:
+    def create_course(self, course_code: str, title: str) -> Course:
         now = datetime.now(UTC)
         try:
             with self.engine.begin() as connection:
@@ -188,11 +189,21 @@ class PostgresGradingRepository:
                 numeric_ids = [int(value) for value in existing_ids if value.isdigit()]
                 course_id = str(max(numeric_ids, default=0) + 1)
                 connection.execute(
-                    insert(courses).values(id=course_id, title=title, created_at=now)
+                    insert(courses).values(
+                        id=course_id,
+                        course_code=course_code,
+                        title=title,
+                        created_at=now,
+                    )
                 )
         except IntegrityError as exc:
             raise GradingConflictError(f"Course '{course_id}' already exists.") from exc
-        return Course(id=course_id, title=title, created_at=now)
+        return Course(
+            id=course_id,
+            course_code=course_code,
+            title=title,
+            created_at=now,
+        )
 
     def get_course(self, course_id: str) -> Course:
         with self.engine.connect() as connection:
