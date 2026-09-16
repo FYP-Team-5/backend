@@ -74,7 +74,7 @@ class LocalLLMClient:
                     ],
                     "temperature": self.temperature,
                     "max_tokens": self.max_tokens,
-                    "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
             )
             response.raise_for_status()
@@ -83,12 +83,12 @@ class LocalLLMClient:
             raise LLMServiceError(f"LLM request to {self.url} failed: {exc}") from exc
 
         try:
-            content = payload["choices"][0]["message"]["content"]
+            content = payload["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise TypeError("message content is empty")
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMResponseError(
-                "LLM response must contain choices[0].message.content."
+                f"LLM response must contain choices[0].message.content. failed: {exc}"
             ) from exc
 
         match = JSON_CODE_FENCE.fullmatch(content.strip())
