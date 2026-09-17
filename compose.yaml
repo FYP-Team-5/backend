@@ -27,10 +27,12 @@ services:
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
-      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2000}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
       MAX_ANSWER_CHARACTERS: ${MAX_ANSWER_CHARACTERS:-50000}
     ports:
       - "${API_PORT:-8002}:8002"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       backend-postgres:
         condition: service_healthy
@@ -66,5 +68,5 @@ volumes:
 
 networks:
   rag_network:
-    external: true
+    # external: true
     name: rubric-rag_default

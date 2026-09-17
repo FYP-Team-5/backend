@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=120, gt=0, le=600)
     llm_max_retries: int = Field(default=1, ge=0, le=10)
     llm_temperature: float = Field(default=0, ge=0, le=2)
-    llm_max_tokens: int = Field(default=2000, ge=128, le=32_768)
+    llm_max_tokens: int = Field(default=2048, ge=128, le=32_768)
 
     max_answer_characters: int = Field(default=50_000, ge=1_000, le=1_000_000)
 

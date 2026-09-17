@@ -18,8 +18,10 @@ from app.service.llm_client import LocalLLMClient
 
 SYSTEM_PROMPT = """You are a strict grading assistant.
 Evaluate whether the student answer fulfills each grading criterion independently.
-Return ONLY a valid JSON array containing 0 or 1, with exactly one value per
-criterion in the same order. Do not include explanations or markdown.
+Return ONLY a valid JSON object with numeric score, string feedback, and a
+criteria_met array containing one object per criterion. Each criteria_met object
+must contain the criterion's id as criteria_id and a boolean is_met. Do not
+include explanations or markdown outside the JSON object.
 """
 
 logger = logging.getLogger(__name__)
