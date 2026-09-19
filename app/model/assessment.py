@@ -20,6 +20,13 @@ class Rubric(BaseModel):
     id: str
     criteria: list[Criteria]
 
+class Example(BaseModel):
+    id: str
+    question_id: str
+    band: Literal["excellent", "average", "poor"]
+    example_answer: str
+    score: float = Field(ge=0)
+
 class Question(BaseModel):
     id: str
     test_id: str
@@ -29,6 +36,8 @@ class Question(BaseModel):
     score_increment: float = Field(gt=0)
     model_answer: str | None = None
     rubric: Rubric | None = None
+    examples: list[Example] = Field(default_factory=list)
+    grading_method: Literal["rubric", "fewshot"] | None = None
     position: int = Field(ge=0)
 
 class Test(BaseModel):

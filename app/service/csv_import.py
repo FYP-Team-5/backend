@@ -3,10 +3,24 @@ from __future__ import annotations
 import csv
 import io
 
-from app.dto import CriteriaCreate, QuestionCreate, RubricCreate
+from app.dto import CriteriaCreate, ExampleCreate, QuestionCreate, RubricCreate
 
 QUESTION_COLUMNS = {"id", "prompt", "max_score", "score_increment"}
 CRITERIA_COLUMNS = {"id", "criteria", "criteria_max_score"}
+EXAMPLES_COLUMNS = {
+    "id",
+    "good_answer",
+    "good_score",
+    "average_answer",
+    "average_score",
+    "bad_answer",
+    "bad_score",
+}
+EXAMPLES_BAND_COLUMNS: dict[str, tuple[str, str]] = {
+    "excellent": ("good_answer", "good_score"),
+    "average": ("average_answer", "average_score"),
+    "poor": ("bad_answer", "bad_score"),
+}
 
 
 class CsvFormatError(ValueError):
@@ -105,3 +119,30 @@ def parse_criteria_csv(content: str) -> dict[str, RubricCreate]:
         )
         for external_id, criteria_list in criteria_by_question.items()
     }
+
+
+def parse_examples_csv(content: str) -> dict[str, list[ExampleCreate]]:
+    """Parse an instructor-uploaded few-shot examples CSV.
+
+    Expected columns: id, good_answer, good_score, average_answer,
+    average_score, bad_answer, bad_score. One row per question, supplying
+    all three exemplar bands at once. 'id' must match an 'id' from the
+    questions CSV exactly — the caller resolves that join.
+    """
+    reader = _read_rows(content, EXAMPLES_COLUMNS, "Examples")
+    examples_by_question: dict[str, list[ExampleCreate]] = {}
+    for line_number, row in enumerate(reader, start=2):
+        external_id = _required_field(row, "id", line_number)
+        if external_id in examples_by_question:
+            raise CsvFormatError(f"Row {line_number}: duplicate question id '{external_id}'.")
+        examples_by_question[external_id] = [
+            ExampleCreate(
+                band=band,
+                example_answer=_required_field(row, answer_column, line_number),
+                score=_required_float(row, score_column, line_number),
+            )
+            for band, (answer_column, score_column) in EXAMPLES_BAND_COLUMNS.items()
+        ]
+    if not examples_by_question:
+        raise CsvFormatError("Examples CSV has no data rows.")
+    return examples_by_question

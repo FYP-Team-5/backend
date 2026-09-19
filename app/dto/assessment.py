@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 from app.model.assessment import Attempt, Response
@@ -15,6 +17,14 @@ class CriteriaCreate(BaseModel):
 class RubricCreate(BaseModel):
     criteria: list[CriteriaCreate] = Field(min_length=1, max_length=100)
     model_answer: str | None = Field(default=None, max_length=10_000)
+
+class ExampleCreate(BaseModel):
+    band: Literal["excellent", "average", "poor"]
+    example_answer: str = Field(min_length=1, max_length=10_000)
+    score: float = Field(ge=0)
+
+class GradingMethodUpdate(BaseModel):
+    method: Literal["rubric", "fewshot"]
 
 class QuestionCreate(BaseModel):
     external_id: str | None = Field(default=None, pattern=ID_PATTERN)
@@ -46,6 +56,13 @@ class GradeAttemptRequest(BaseModel):
     def validate_response_ids(self) -> "GradeAttemptRequest":
         ids = [response.question_id for response in self.responses]
         if len(ids) != len(set(ids)): raise ValueError("each question may appear only once per request")
+        return self
+
+class FewShotGradeRequest(BaseModel):
+    answer: str = Field(min_length=1)
+    @model_validator(mode="after")
+    def validate_answer(self) -> "FewShotGradeRequest":
+        if not self.answer.strip(): raise ValueError("answer must contain non-whitespace text")
         return self
 
 class AttemptGradeResponse(BaseModel):

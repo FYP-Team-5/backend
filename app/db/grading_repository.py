@@ -25,12 +25,13 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from app.dto import RubricCreate, TestCreate
+from app.dto import ExampleCreate, RubricCreate, TestCreate
 from app.model import (
     Attempt,
     Course,
     Criteria,
     CriteriaMet,
+    Example,
     Question,
     Response,
     Rubric,
@@ -85,6 +86,7 @@ questions = Table(
     Column("score_increment", Float, nullable=False),
     Column("model_answer", Text, nullable=True),
     Column("rubric_id", ForeignKey("grading_rubrics.id"), nullable=True, unique=True),
+    Column("grading_method", String(16), nullable=True),
     UniqueConstraint("test_id", "position", name="uq_grading_question_position"),
     UniqueConstraint("test_id", "external_id", name="uq_grading_question_external_id"),
 )
@@ -120,6 +122,18 @@ responses = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
+)
+
+examples = Table(
+    "grading_examples",
+    grading_metadata,
+    Column("id", String(36), primary_key=True),
+    Column("question_id", ForeignKey("grading_questions.id"), nullable=False, index=True),
+    Column("band", String(32), nullable=False),
+    Column("example_answer", Text, nullable=False),
+    Column("score", Float, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("question_id", "band", name="uq_grading_example_question_band"),
 )
 
 criteria_met = Table(
@@ -333,6 +347,50 @@ class PostgresGradingRepository:
             raise GradingConflictError("Rubric identifiers already exist.") from exc
         return self._get_question(question_id)
 
+    def set_question_examples(
+        self, test_id: str, question_id: str, request: list[ExampleCreate]
+    ) -> Question:
+        now = datetime.now(UTC)
+        with self.engine.begin() as connection:
+            question_row = (
+                connection.execute(
+                    select(questions.c.id)
+                    .where(questions.c.id == question_id, questions.c.test_id == test_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .first()
+            )
+            if question_row is None:
+                raise GradingRecordNotFoundError(question_id)
+            connection.execute(delete(examples).where(examples.c.question_id == question_id))
+            connection.execute(
+                insert(examples),
+                [
+                    {
+                        "id": str(uuid.uuid4()),
+                        "question_id": question_id,
+                        "band": item.band,
+                        "example_answer": item.example_answer,
+                        "score": item.score,
+                        "created_at": now,
+                    }
+                    for item in request
+                ],
+            )
+        return self._get_question(question_id)
+
+    def set_grading_method(self, test_id: str, question_id: str, method: str) -> Question:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(questions)
+                .where(questions.c.id == question_id, questions.c.test_id == test_id)
+                .values(grading_method=method)
+            )
+        if result.rowcount == 0:
+            raise GradingRecordNotFoundError(question_id)
+        return self._get_question(question_id)
+
     def get_test(self, test_id: str) -> Test:
         try:
             with self.engine.connect() as connection:
@@ -362,6 +420,16 @@ class PostgresGradingRepository:
                     if rubric_ids
                     else []
                 )
+                question_ids = [row["id"] for row in question_rows]
+                example_rows = (
+                    connection.execute(
+                        select(examples).where(examples.c.question_id.in_(question_ids))
+                    )
+                    .mappings()
+                    .all()
+                    if question_ids
+                    else []
+                )
         except SQLAlchemyError as exc:
             raise GradingStoreError("Unable to read test data.") from exc
         if test_row is None:
@@ -369,7 +437,10 @@ class PostgresGradingRepository:
         criteria_by_rubric: dict[str, list[RowMapping]] = {}
         for row in criteria_rows:
             criteria_by_rubric.setdefault(row["rubric_id"], []).append(row)
-        return self._to_test(test_row, question_rows, criteria_by_rubric)
+        examples_by_question: dict[str, list[RowMapping]] = {}
+        for row in example_rows:
+            examples_by_question.setdefault(row["question_id"], []).append(row)
+        return self._to_test(test_row, question_rows, criteria_by_rubric, examples_by_question)
 
     def list_tests(self, course_id: str) -> list[Test]:
         if not self._course_exists_for_read(course_id):
@@ -510,18 +581,23 @@ class PostgresGradingRepository:
             connection.execute(
                 delete(criteria_met).where(criteria_met.c.response_id == response_id)
             )
-            connection.execute(
-                insert(criteria_met),
-                [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "response_id": response_id,
-                        "criteria_id": item["criteria_id"],
-                        "is_met": item["is_met"],
-                    }
-                    for item in criteria_met_results
-                ],
-            )
+            if criteria_met_results:
+                # An empty list here would make SQLAlchemy execute a single
+                # INSERT ... DEFAULT VALUES (it can't infer columns from zero
+                # dicts) instead of a no-op, so this must stay guarded —
+                # few-shot-graded responses always pass an empty list.
+                connection.execute(
+                    insert(criteria_met),
+                    [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "response_id": response_id,
+                            "criteria_id": item["criteria_id"],
+                            "is_met": item["is_met"],
+                        }
+                        for item in criteria_met_results
+                    ],
+                )
 
     def list_responses(self, attempt_id: str) -> list[Response]:
         statement = (
@@ -625,10 +701,21 @@ class PostgresGradingRepository:
                     .mappings()
                     .all()
                 )
-        return self._to_question(question_row, criteria_rows)
+            example_rows = (
+                connection.execute(
+                    select(examples).where(examples.c.question_id == question_id)
+                )
+                .mappings()
+                .all()
+            )
+        return self._to_question(question_row, criteria_rows, example_rows)
 
     @staticmethod
-    def _to_question(question_row: RowMapping, criteria_rows: list[RowMapping]) -> Question:
+    def _to_question(
+        question_row: RowMapping,
+        criteria_rows: list[RowMapping],
+        example_rows: list[RowMapping],
+    ) -> Question:
         rubric_id = question_row["rubric_id"]
         rubric = (
             Rubric(
@@ -641,6 +728,7 @@ class PostgresGradingRepository:
         return Question(
             **{key: value for key, value in dict(question_row).items() if key != "rubric_id"},
             rubric=rubric,
+            examples=[Example.model_validate(dict(item)) for item in example_rows],
         )
 
     @classmethod
@@ -649,11 +737,16 @@ class PostgresGradingRepository:
         test_row: RowMapping,
         question_rows: list[RowMapping],
         criteria_by_rubric: dict[str, list[RowMapping]],
+        examples_by_question: dict[str, list[RowMapping]],
     ) -> Test:
         return Test(
             **dict(test_row),
             questions=[
-                cls._to_question(row, criteria_by_rubric.get(row["rubric_id"], []))
+                cls._to_question(
+                    row,
+                    criteria_by_rubric.get(row["rubric_id"], []),
+                    examples_by_question.get(row["id"], []),
+                )
                 for row in question_rows
             ],
         )

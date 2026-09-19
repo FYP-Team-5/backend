@@ -19,8 +19,8 @@ from app.dto import (
     TestCreate,
 )
 from app.service import (
+    GradingMethodNotAssignedError,
     GradingService,
-    RubricNotAssignedError,
     UnknownQuestionError,
 )
 
@@ -260,7 +260,7 @@ def test_attempt_cannot_start_while_a_question_has_no_rubric() -> None:
         )
     )
 
-    with pytest.raises(RubricNotAssignedError, match="missing a rubric"):
+    with pytest.raises(GradingMethodNotAssignedError, match="missing a grading method"):
         asyncio.run(service.create_attempt(test.id, "student-1"))
 
     asyncio.run(

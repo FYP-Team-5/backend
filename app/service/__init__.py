@@ -3,11 +3,13 @@ from app.service.auth_service import AuthService
 from app.service.catalog_service import CatalogService
 from app.service.csv_import import CsvFormatError
 from app.service.grading_service import (
+    ExamplesNotAssignedError,
+    GradingMethodAmbiguousError,
+    GradingMethodNotAssignedError,
     GradingService,
     IncompleteAttemptError,
     LLMCriteriaMismatchError,
     LLMScoreScaleError,
-    RubricNotAssignedError,
     StudentAnswerTooLargeError,
     UnknownQuestionError,
 )
@@ -28,6 +30,9 @@ __all__ = [
     "AuthorizationError",
     "CatalogService",
     "CsvFormatError",
+    "ExamplesNotAssignedError",
+    "GradingMethodAmbiguousError",
+    "GradingMethodNotAssignedError",
     "GradingService",
     "IdentityService",
     "IncompleteAttemptError",
@@ -38,7 +43,6 @@ __all__ = [
     "LLMServiceError",
     "LocalLLMClient",
     "PasswordHasher",
-    "RubricNotAssignedError",
     "StaffRegistrationError",
     "StudentAnswerTooLargeError",
     "TokenManager",

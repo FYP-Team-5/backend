@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from app.dto import CriteriaGradingResult
+from app.dto import CriteriaGradingResult, FewShotGradingResult
 
 JSON_CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 
@@ -62,7 +62,7 @@ class LocalLLMClient:
         except httpx.HTTPError:
             return False
 
-    async def grade(self, *, system_prompt: str, user_prompt: str) -> CriteriaGradingResult:
+    async def _request_content(self, *, system_prompt: str, user_prompt: str) -> str:
         try:
             response = await self._client.post(
                 self.url,
@@ -93,9 +93,20 @@ class LocalLLMClient:
             ) from exc
 
         match = JSON_CODE_FENCE.fullmatch(content.strip())
-        if match:
-            content = match.group(1)
+        return match.group(1) if match else content
+
+    async def grade(self, *, system_prompt: str, user_prompt: str) -> CriteriaGradingResult:
+        content = await self._request_content(system_prompt=system_prompt, user_prompt=user_prompt)
         try:
             return CriteriaGradingResult.model_validate_json(content)
+        except ValidationError as exc:
+            raise LLMResponseError(f"LLM returned an invalid grading result: {exc}") from exc
+
+    async def grade_fewshot(
+        self, *, system_prompt: str, user_prompt: str
+    ) -> FewShotGradingResult:
+        content = await self._request_content(system_prompt=system_prompt, user_prompt=user_prompt)
+        try:
+            return FewShotGradingResult.model_validate_json(content)
         except ValidationError as exc:
             raise LLMResponseError(f"LLM returned an invalid grading result: {exc}") from exc
