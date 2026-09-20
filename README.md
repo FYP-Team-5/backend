@@ -1,37 +1,29 @@
-# User Identity Service
+# Backend
 
-FastAPI microservice for student and staff accounts, authentication, and identity administration. It is the source of truth for people in the assessment system; RAG remains the source of truth for rubric files and chunks, while grading remains the source of truth for courses, exams, attempts, answers, grades, and AI feedback.
+FastAPI service that hosts **identity** (student/staff accounts, auth) and
+**catalog/grading** (courses, tests, questions, rubrics, few-shot examples,
+attempts, LLM grading) in one app on one PostgreSQL database.
 
-The service runs on port `8002` by default and exposes interactive documentation at `http://localhost:8002/docs`.
+The service runs on port `8002` by default and exposes interactive
+documentation at `http://localhost:8002/docs`.
 
-## Responsibilities and service boundaries
+## Two auth zones on one origin
 
-| Service | Owns | Cross-service identifiers |
+| Zone | Routes | Mechanism |
 |---|---|---|
-| User | Users, student/staff profiles, password hashes, account status | Stable UUID in `User.id` and JWT `sub` |
-| RAG | Rubric metadata, uploaded files, processing status, embeddings, Qdrant chunks | `course_id`, `exam_id`, `rubric_id` |
-| Grading | Courses, exams/quizzes, questions, rubric mappings, attempts, answers, scores, AI feedback | `student_id`, `course_id`, `exam_id`, `rubric_id` |
+| Identity | `GET /health`, `/api/v1/auth/*`, `/api/v1/users/*` | `Authorization: Bearer <jwt>` (public for register/login) |
+| Catalog & grading | `/api/v1/courses/*`, `/api/v1/tests/*` | `X-API-Key` header, checked against `Settings.api_key` — skipped entirely if `API_KEY` is unset |
 
-The grading service's `student_id` should contain the User service's stable `User.id`, not a student number or email. Student/staff numbers and emails can change; the UUID is the durable relationship used for attempts and feedback.
-
-This service intentionally does not duplicate Course, Exam, Question, Rubric, Attempt, or AI-feedback models. Those models stay in the service that owns their lifecycle.
-
-### Three-service model contract
-
-The models and database columns across the repositories use the following contract:
-
-| Concept | Authoritative model | Referenced by | Contract |
-|---|---|---|---|
-| User identity | User `User.id` | Grading `Attempt.student_id`, JWT `sub` | UUID string, 36 characters; also valid under the shared 1–128 character external-ID format |
-| Student/staff number | User `Student.student_number` / `Staff.staff_number` | User token `institutional_number` | 1–64 letters, numbers, `_`, `.`, or `-`; display/institutional identity, not a foreign key |
-| Course | Grading `Course.id` | RAG `Rubric.course_id` and Qdrant metadata | Shared 1–128 character external ID |
-| Exam/quiz | Grading `Exam.id` | RAG `Rubric.exam_id` and Qdrant metadata | Shared 1–128 character external ID |
-| Rubric | RAG `Rubric.id` | Grading `Exam.rubric_id`, attempts, and grades | Shared 1–128 character external ID |
-| Rubric document | RAG `StoredRubric.document_id` | Grading rubric metadata and Qdrant filtering | Generated UUID string |
-| Rubric version | RAG rubric metadata | Grading attempts and grades | String, up to 64 characters in persistence |
-| Question and attempt | Grading models | Grading responses and grades | Question IDs use the shared external-ID format; attempt IDs are generated UUID strings |
-
-RAG and grading both use `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` for shared resource identifiers. The User service exposes the same contract in `app/model/identifiers.py` and constrains generated user IDs/JWT subjects to UUID strings. This confirms that a User `id` can be passed unchanged as grading's `student_id`.
+The catalog/grading zone's course/test-authoring routes still don't
+validate the JWT — the `X-API-Key` alone gates them. Attempt routes
+(`/tests/{id}/attempts*`) are the exception: they additionally require the
+caller's own `Authorization: Bearer <jwt>`, and the attempt's owner is
+always taken from that token's `sub` claim via the `current_user_id`
+dependency, never from a caller-supplied id. Earlier this was an
+unauthenticated `X-User-ID` header, which let anyone holding the API key
+read or grade any user's attempts by simply naming a different id; that
+gap is closed now that the identity itself is a verified token, not a
+free-form header.
 
 ## User model
 
@@ -39,57 +31,104 @@ RAG and grading both use `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` for shared resourc
 
 ```text
 User
-├── Student + student_number
-└── Staff   + staff_number
+├── Student + student_number, role="student"
+└── Staff   + staff_number,   role="instructor"
 ```
 
-Shared fields are:
+Shared fields: `id`, `email` (unique, lowercased), `full_name`, `role`,
+`active`, `created_at`, `updated_at`.
 
-- `id`: generated UUID and cross-service identity
-- `email`: unique, normalized to lowercase
-- `full_name`
-- `role`: `student` or `staff`
-- `active`: controls login and token acceptance
-- `created_at` and `updated_at`
+`id` is a **plain sequential digit string**, not a UUID — students and
+staff are numbered from separate ranges so the two can never collide:
+students start at `1000001`, staff/instructors at `2000001`. It's assigned
+by scanning existing ids for the role and taking the max + 1, done inside
+the same transaction as the insert.
 
-The PostgreSQL schema mirrors the inheritance model with a common `users` table and one-to-one `student_profiles` and `staff_profiles` tables. Emails are globally unique. Student numbers are unique among students, and staff numbers are unique among staff.
-
-### Database-backed models
-
-| Model | Attributes | Purpose |
-|---|---|---|
-| `User` | `id`, `email`, `full_name`, `role`, `active`, `created_at`, `updated_at` | Parent domain model backed by the common `users` table (whose persistence-only fields also include `password_hash`). |
-| `Student` | All `User` fields plus `student_number` | Student subtype backed by `users` and its mandatory application-level one-to-one `student_profiles` row. |
-| `Staff` | All `User` fields plus `staff_number` | Staff subtype backed by `users` and its mandatory application-level one-to-one `staff_profiles` row. |
+The PostgreSQL schema mirrors the inheritance model: a common `users` table
+plus one-to-one `student_profiles`/`staff_profiles` tables. Emails are
+globally unique; student numbers are unique among students; staff numbers
+are unique among staff.
 
 ### DTOs
 
-DTO definitions live in `app/dto/`; they represent requests, responses, and signed-token payloads and are not stored as database rows.
+DTO definitions live in `app/dto/`.
 
-| DTO | Attributes | Purpose |
-|---|---|---|
-| `StudentRegistration` | `email`, `full_name`, `password`, `student_number` | Student registration request. |
-| `StaffRegistration` | `email`, `full_name`, `password`, `staff_number` | Staff registration request. |
-| `LoginRequest` | `email`, `password` | Login credentials request. |
-| `UserResponse` | Discriminated union of `Student` or `Staff` | Returns the correctly typed public user profile. |
-| `TokenResponse` | `access_token`, `token_type`, `expires_in`, `user` | Successful login/registration response. |
-| `UserStatusUpdate` | `active` | Staff request to activate or deactivate a user. |
-| `TokenClaims` | `sub`, `role`, `email`, `institutional_number`, `iss`, `aud`, `iat`, `exp`, `jti` | Validated JWT claims used by authentication. |
-| `HealthResponse` | `status`, `postgres` | Health endpoint response. |
+| DTO | Purpose |
+|---|---|
+| `StudentRegistration` / `StaffRegistration` | Registration requests (`email`, `full_name`, `password`, and the role-specific number). |
+| `LoginRequest` | Login credentials. |
+| `UserResponse` | Discriminated union of `Student`/`Staff` by `role`. |
+| `TokenResponse` | `access_token`, `token_type`, `expires_in`, `user`. |
+| `UserStatusUpdate` | `active` — staff activate/deactivate request. |
+| `TokenClaims` | `sub`, `role`, `email`, `institutional_number`, `iss`, `aud`, `iat`, `exp`, `jti`. |
+| `HealthResponse` | `status`, `postgres`, `llm`, `model`. |
+| `CourseCreate`, `TestCreate`, `QuestionCreate`, `RubricCreate`, `CriteriaCreate`, `ExampleCreate` | Catalog authoring requests. |
+| `GradeAttemptRequest`, `FewShotGradeRequest` | Student-answer submission requests. |
+| `AttemptGradeResponse` | Attempt + graded responses + score totals. |
 
 ## Authentication and authorization
 
-Passwords must contain 12–256 characters and are stored as salted `scrypt` hashes. A successful login returns a signed HS256 bearer token. The token contains:
+Passwords must be 12–256 characters and are stored as salted `scrypt`
+hashes. A successful login returns a signed HS256 bearer token containing
+`sub` (the numeric user id), `role` (`student`/`instructor`), `email`,
+`institutional_number`, and standard `iss`/`aud`/`iat`/`exp`/`jti` claims.
 
-- `sub`: stable `User.id`
-- `role`: `student` or `staff`
-- `email`
-- `institutional_number`: the student or staff number
-- `iss`, `aud`, `iat`, `exp`, and `jti`
+Every request to a protected identity-zone route re-verifies the
+signature, issuer, audience, timestamps, and the current database record —
+deactivating a user invalidates their existing tokens immediately.
 
-Protected User service routes require `Authorization: Bearer <token>`. Each request verifies the signature, issuer, audience, issue/expiry time, and current database record. Deactivating a user therefore invalidates their existing tokens immediately.
+Student self-registration is public. Staff registration additionally
+requires the bootstrap secret in `X-Staff-Registration-Key`. Rotate or
+disable that bootstrap path after provisioning production administrators.
 
-Student self-registration is public. Staff registration additionally requires the bootstrap secret in `X-Staff-Registration-Key`. Rotate or disable that bootstrap path after provisioning production administrators. Staff can list users, read any profile, and activate/deactivate other accounts; students can only read their own profile.
+## Catalog and grading domain
+
+```text
+Course
+└── Test (max_attempts, questions)
+    └── Question (max_score, score_increment, model_answer)
+        ├── Rubric — criteria list, each with its own max score
+        └── Examples — one good/average/poor exemplar answer + score each
+```
+
+A question is graded either by its **rubric** (LLM checks each criterion
+independently, returns which are met) or by its **few-shot examples** (LLM
+compares the answer holistically against the exemplars). If a question has
+only one of the two attached, that one is used automatically. If it has
+both, `PUT /tests/{id}/questions/{qid}/grading-method` must pick one before
+an attempt can be created — otherwise attempt creation fails with 409.
+
+Questions, rubrics, and examples can each be authored either via a single
+JSON request or via CSV upload (`csv_import.py` parses with Python's `csv`
+module — a real RFC 4180 parser, so answer text containing commas or line
+breaks must be quoted; see [`demo/README.md`](../demo/README.md) for a
+worked example). All three CSV formats join rows to questions by an
+instructor-supplied `id` column, not by row position.
+
+**Attempt flow:** `POST /tests/{id}/attempts` (with the student's bearer
+token) creates an attempt owned by that token's user, failing fast if any
+question's grading method is unresolved.
+`POST /tests/{id}/attempts/{aid}/grade` saves the submitted answers and
+kicks off grading in a background asyncio task per response, returning
+immediately with the attempt in `grading` status — poll
+`GET /tests/{id}/attempts/{aid}` for the graded result. A single answer
+failing to grade (LLM error, invalid score) marks the whole attempt
+`failed` with an error message, but responses already scored are kept.
+
+`POST /tests/{id}/questions/{qid}/grade-fewshot` grades one ad-hoc answer
+against a question's few-shot examples without touching the attempt
+lifecycle at all — it exists purely to compare few-shot output against the
+rubric-based path, and nothing is persisted.
+
+### LLM grading
+
+`LocalLLMClient` talks to any OpenAI-compatible chat-completions endpoint
+(the default `.env.example` points at a local Ollama instance) using
+`response_format: json_object`, then validates the returned JSON against
+`CriteriaGradingResult` (rubric mode: score, feedback, per-criterion
+met/unmet) or `FewShotGradingResult` (score, feedback). A criterion id the
+LLM invents that isn't in the question's rubric, or a score outside
+`[0, max_score]`, fails that response rather than being silently accepted.
 
 ## Run locally
 
@@ -99,7 +138,25 @@ docker compose up --build -d
 curl http://localhost:8002/health
 ```
 
-Set strong, random values for `JWT_SECRET`, `STAFF_REGISTRATION_KEY`, and `POSTGRES_PASSWORD` before any non-development deployment. The JWT secret must be at least 32 bytes.
+Grading requires a reachable OpenAI-compatible LLM endpoint (`LLM_URL`) —
+`/health` reports `llm` readiness by hitting that endpoint's `/models`
+route, and grading itself will fail per-response if it's unreachable. The
+default `.env.example` points at a local Ollama instance
+(`http://host.docker.internal:11434/v1/chat/completions`); to use it,
+install [Ollama](https://ollama.com), pull a model, and set `LLM_MODEL` to
+match. For local development a small model such as `qwen3:0.6b` is enough
+to exercise the grading flow end to end and starts up fast:
+
+```bash
+ollama pull qwen3:0.6b
+# then set LLM_MODEL=qwen3:0.6b in .env
+```
+
+Swap in a larger model for grading quality closer to production.
+
+Set strong, random values for `JWT_SECRET`, `STAFF_REGISTRATION_KEY`, and
+`POSTGRES_PASSWORD` before any non-development deployment. The JWT secret
+must be at least 32 bytes.
 
 Useful commands:
 
@@ -113,8 +170,6 @@ make down
 ## User flows
 
 ### 1. Register a student
-
-The frontend collects the student's institutional number, email, full name, and password. The service creates the parent user and student profile in one database transaction; the response never contains the password hash.
 
 ```bash
 curl -X POST http://localhost:8002/api/v1/auth/register/student \
@@ -131,8 +186,6 @@ Duplicate emails or student numbers return `409`; invalid fields return `422`.
 
 ### 2. Register a staff member
 
-An administrator supplies the server-managed staff bootstrap key in addition to the account fields.
-
 ```bash
 curl -X POST http://localhost:8002/api/v1/auth/register/staff \
   -H 'Content-Type: application/json' \
@@ -145,19 +198,15 @@ curl -X POST http://localhost:8002/api/v1/auth/register/staff \
   }'
 ```
 
-A missing or incorrect bootstrap key returns `403`.
+A missing or incorrect bootstrap key returns `403`. The account is created
+with `role: "instructor"`.
 
 ### 3. Log in
-
-Students and staff use the same endpoint. Save the returned bearer token and the returned `user.id` in frontend session state.
 
 ```bash
 curl -X POST http://localhost:8002/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{
-    "email":"student@example.edu",
-    "password":"a-secure-student-password"
-  }'
+  -d '{"email":"student@example.edu","password":"a-secure-student-password"}'
 ```
 
 Example response:
@@ -168,104 +217,133 @@ Example response:
   "token_type": "bearer",
   "expires_in": 1800,
   "user": {
-    "id": "60f1ec55-f74e-4924-a9ee-1d79f902f846",
+    "id": "1000001",
     "email": "student@example.edu",
     "full_name": "Student One",
     "role": "student",
     "active": true,
     "student_number": "S0001",
-    "created_at": "2026-08-18T00:00:00Z",
-    "updated_at": "2026-08-18T00:00:00Z"
+    "created_at": "2026-09-01T00:00:00Z",
+    "updated_at": "2026-09-01T00:00:00Z"
   }
 }
 ```
 
-Unknown credentials and inactive accounts return `401` without revealing whether the email exists.
+Unknown credentials and inactive accounts return `401` without revealing
+whether the email exists.
 
 ### 4. Read the current profile
 
 ```bash
-curl http://localhost:8002/api/v1/users/me \
-  -H 'Authorization: Bearer <token>'
+curl http://localhost:8002/api/v1/users/me -H 'Authorization: Bearer <token>'
 ```
-
-This is useful when restoring frontend session state after a reload. It also confirms that the account is still active.
 
 ### 5. Administer users as staff
 
-List every user or filter by role:
-
 ```bash
-curl 'http://localhost:8002/api/v1/users?role=student' \
-  -H 'Authorization: Bearer <staff-token>'
-```
-
-Read a specific user:
-
-```bash
-curl http://localhost:8002/api/v1/users/<user-id> \
-  -H 'Authorization: Bearer <staff-token>'
-```
-
-Deactivate an account:
-
-```bash
+curl 'http://localhost:8002/api/v1/users?role=student' -H 'Authorization: Bearer <staff-token>'
+curl http://localhost:8002/api/v1/users/<user-id> -H 'Authorization: Bearer <staff-token>'
 curl -X PATCH http://localhost:8002/api/v1/users/<user-id>/status \
-  -H 'Authorization: Bearer <staff-token>' \
-  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <staff-token>' -H 'Content-Type: application/json' \
   -d '{"active":false}'
 ```
 
-Staff cannot deactivate their own account. Deactivated users cannot log in or use tokens issued earlier.
+Staff cannot deactivate their own account.
 
-### 6. Upload and manage a rubric as staff
+### 6. Build a test as an instructor
 
-1. Staff logs in to the User service and receives a token whose `role` is `staff`.
-2. The frontend sends the rubric, `course_id`, and `exam_id` through a trusted backend or API gateway to the RAG upload endpoint.
-3. RAG stores metadata in its PostgreSQL database, processes the file through its embedding container, and stores chunks in Qdrant.
-4. Staff polls RAG processing status, inspects chunks, maps them to grading questions, and activates the rubric version on the exam.
+```bash
+curl -X POST http://localhost:8002/api/v1/courses \
+  -H "X-API-Key: <key>" -H 'Content-Type: application/json' \
+  -d '{"course_code":"CS101","course_name":"Intro to CS"}'
 
-The current RAG service still protects its API with `X-API-Key`; it does not yet validate User service bearer tokens. Keep the RAG API key in a trusted backend or API gateway, never in public browser code.
+curl -X POST http://localhost:8002/api/v1/courses/<course_id>/tests/csv \
+  -H "X-API-Key: <key>" \
+  -F "file=@questions.csv;type=text/csv" -F "test_name=Quiz 1" -F "max_attempts=1"
 
-### 7. Submit answers for grading as a student
+curl -X POST http://localhost:8002/api/v1/tests/<test_id>/criteria/csv \
+  -H "X-API-Key: <key>" -F "file=@criteria.csv;type=text/csv"
 
-1. The student logs in and the frontend retains `user.id` from the login response.
-2. The frontend creates or resumes an attempt for the tagged `exam_id`.
-3. Until grading JWT validation is wired in, the frontend/backend identity adapter supplies `X-Student-ID: <user.id>` to the grading attempt routes.
-4. The grading service stores answers under that attempt, reads the exam/rubric metadata from PostgreSQL, retrieves the mapped chunks directly from shared Qdrant, calls the external LLM, and stores the scores and feedback with the attempt.
-5. The frontend retrieves the attempt result using the same stable user ID.
+curl -X POST http://localhost:8002/api/v1/tests/<test_id>/examples/csv \
+  -H "X-API-Key: <key>" -F "file=@examples.csv;type=text/csv"
+```
 
-One-answer and multi-answer grading requests use the same attempt identity. The exam's `max_attempts` controls whether the student receives one or multiple attempts.
+See [`demo/README.md`](../demo/README.md) for ready-made sample CSVs and
+the full end-to-end walkthrough, including the frontend flow.
+
+### 7. Submit and grade an attempt as a student
+
+The student's own bearer token from login (step 3) identifies whose
+attempt this is — there's no separate id to pass.
+
+```bash
+curl -X POST http://localhost:8002/api/v1/tests/<test_id>/attempts \
+  -H "X-API-Key: <key>" -H "Authorization: Bearer <student-token>"
+
+curl -X POST http://localhost:8002/api/v1/tests/<test_id>/attempts/<attempt_id>/grade \
+  -H "X-API-Key: <key>" -H "Authorization: Bearer <student-token>" -H 'Content-Type: application/json' \
+  -d '{"responses":[{"question_id":"<question_id>","answer":"..."}]}'
+
+curl http://localhost:8002/api/v1/tests/<test_id>/attempts/<attempt_id> \
+  -H "X-API-Key: <key>" -H "Authorization: Bearer <student-token>"
+```
+
+Grading runs in the background per response — poll the last endpoint until
+`attempt.status` is `graded` or `failed`.
 
 ## API reference
 
 | Method | Route | Access | Purpose |
 |---|---|---|---|
-| `GET` | `/health` | Public | Check PostgreSQL readiness |
+| `GET` | `/health` | Public | Postgres + LLM readiness |
 | `POST` | `/api/v1/auth/register/student` | Public | Create a student account |
 | `POST` | `/api/v1/auth/register/staff` | Bootstrap key | Create a staff account |
-| `POST` | `/api/v1/auth/login` | Public | Verify credentials and issue a token |
+| `POST` | `/api/v1/auth/login` | Public | Verify credentials, issue a token |
 | `GET` | `/api/v1/users/me` | Bearer token | Read the current profile |
 | `GET` | `/api/v1/users` | Staff | List/filter users |
 | `GET` | `/api/v1/users/{user_id}` | Self or staff | Read a user profile |
 | `PATCH` | `/api/v1/users/{user_id}/status` | Staff | Activate/deactivate an account |
+| `POST` | `/api/v1/courses` | API key | Create a course |
+| `GET` | `/api/v1/courses` | API key | List courses |
+| `POST` | `/api/v1/courses/{course_id}/tests` | API key | Create a test (JSON questions) |
+| `POST` | `/api/v1/courses/{course_id}/tests/csv` | API key | Create a test from a questions CSV |
+| `GET` | `/api/v1/courses/{course_id}/tests` | API key | List a course's tests |
+| `GET` | `/api/v1/tests/{test_id}` | API key | Read a test and its questions |
+| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/rubric` | API key | Set a question's rubric |
+| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/grading-method` | API key | Force rubric vs. few-shot when both are attached |
+| `POST` | `/api/v1/tests/{test_id}/criteria/csv` | API key | Bulk-attach rubrics from CSV |
+| `POST` | `/api/v1/tests/{test_id}/examples/csv` | API key | Bulk-attach few-shot examples from CSV |
+| `POST` | `/api/v1/tests/{test_id}/questions/{question_id}/grade-fewshot` | API key | Ad-hoc few-shot grading, not persisted |
+| `POST` | `/api/v1/tests/{test_id}/attempts` | API key + bearer token | Start an attempt for the token's user |
+| `GET` | `/api/v1/tests/{test_id}/attempts` | API key + bearer token | List the token's user's attempts |
+| `POST` | `/api/v1/tests/{test_id}/attempts/{attempt_id}/grade` | API key + bearer token | Submit answers, start background grading |
+| `GET` | `/api/v1/tests/{test_id}/attempts/{attempt_id}` | API key + bearer token | Read attempt status and graded responses |
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `API_PORT` | `8002` | Host port used by Docker Compose |
-| `DATABASE_URL` | local PostgreSQL URL | SQLAlchemy connection URL |
+| `DATABASE_URL` | local PostgreSQL URL | SQLAlchemy connection URL for this service's own database |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | development values | Compose database settings |
+| `API_KEY` | unset | `X-API-Key` required on `/courses` and `/tests` routes; unset disables the check entirely |
 | `JWT_SECRET` | development-only value | HS256 signing secret, minimum 32 bytes |
 | `JWT_ISSUER` | `user-service` | Required token issuer |
 | `JWT_AUDIENCE` | `assessment-services` | Required downstream audience |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Token lifetime, 1–1440 minutes |
 | `STAFF_REGISTRATION_KEY` | development-only value | Staff account bootstrap secret |
+| `LLM_URL` | local Ollama chat-completions URL | OpenAI-compatible grading endpoint |
+| `LLM_MODEL` | `local-model` | Model name sent in grading requests |
+| `LLM_API_KEY` | unset | Bearer token for the LLM endpoint, if it requires one |
+| `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` / `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | `120` / `1` / `0` / `2048` | LLM request tuning |
+| `MAX_ANSWER_CHARACTERS` | `50000` | Longest student answer accepted before grading rejects it |
 | `CORS_ORIGINS` | `*` | Comma-separated frontend origins |
 | `LOG_LEVEL` | `INFO` | Application log level |
 
-Downstream services that locally verify these HS256 tokens must use the same `JWT_SECRET`, `JWT_ISSUER`, and `JWT_AUDIENCE`. A production deployment can instead put verification in an API gateway; do not expose the shared JWT secret to the frontend.
+Downstream services that locally verify these HS256 tokens must use the
+same `JWT_SECRET`, `JWT_ISSUER`, and `JWT_AUDIENCE`. A production
+deployment can instead put verification in an API gateway; do not expose
+the shared JWT secret to the frontend.
 
 ## Testing and CI
 
@@ -276,20 +354,29 @@ python -m ruff check app tests
 python -m pytest -q
 ```
 
-`.github/workflows/ci.yml` runs linting and tests for pull requests and non-`main` pushes. `.github/workflows/post-merge.yml` repeats both checks after a merge to `main`, then creates the next `v0.N` tag beginning with `v0.1`. The GitHub Container Registry job is included but commented out.
+`.github/workflows/ci.yml` runs linting and tests for pull requests and
+pushes to `main`. `.github/workflows/post-merge.yml` repeats both checks
+after a merge to `main`, then creates the next `v0.N` tag beginning with
+`v0.1`. The GitHub Container Registry publish job is included but
+commented out.
 
-The repository follows the same operational layout as RAG and grading:
-
-- `Dockerfile`, `.dockerignore`, `compose.yaml`, and `.env.example` for containerized local operation
-- `requirements.txt` with pinned runtime and test dependencies; CI installs Ruff directly in YAML, so there is no separate CI requirements file
-- `pytest.ini` plus controller, database, model, and service test directories
-- `Makefile` targets for `up`, `down`, `logs`, `lint`, `test`, and `ci`
-- matching pull-request and post-merge GitHub Actions workflows
+Test layout under `tests/` mirrors `app/`: `controller/`, `db/`, `model/`,
+and `service/` directories, plus `conftest.py` for shared fixtures.
 
 ## Current limitations
 
-- RAG and grading do not yet validate this service's bearer tokens. RAG currently uses `X-API-Key`; grading uses `X-API-Key` plus the caller-provided `X-Student-ID`. Production integration must validate the JWT at a gateway or inside both services, derive student identity from `sub`, and enforce `staff` for administration routes.
-- Tokens use a shared HS256 secret and there is no refresh-token or logout/revocation list. Account deactivation is checked by this service, but independently validating downstream services need a short token lifetime or an introspection/revocation strategy.
-- Student self-registration is unrestricted beyond uniqueness and field validation. Institutional enrollment verification and email verification are not implemented.
-- Database tables are created at startup with SQLAlchemy metadata. Use versioned migrations before evolving a production schema.
-- Rate limiting, password reset, multi-factor authentication, and audit logging are not implemented.
+- The catalog/grading zone's course/test-authoring routes (`X-API-Key`
+  only) still don't verify the caller's JWT or role — anything holding the
+  API key can create courses/tests and attach rubrics. Attempt routes are
+  the exception and now require the caller's own bearer token. It's
+  designed to sit behind a trusted backend or gateway, not to be exposed
+  directly.
+- Tokens use a shared HS256 secret; there is no refresh token or
+  logout/revocation list beyond checking `active` on every request.
+- Student self-registration is unrestricted beyond uniqueness and field
+  validation — no institutional enrollment or email verification.
+- Database tables are created at startup with SQLAlchemy metadata
+  (`create_all`); there are no versioned migrations, so schema changes
+  require manually recreating affected tables in any pre-existing database.
+- Rate limiting, password reset, multi-factor authentication, and audit
+  logging are not implemented.

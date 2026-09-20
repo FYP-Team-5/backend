@@ -2,7 +2,7 @@ import re
 import secrets
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 from app.dto import (
@@ -67,11 +67,11 @@ async def require_api_key(
     ):
         raise HTTPException(status_code=401, detail="Missing or invalid API key.")
 
-async def require_user_id(
-    user_id: Annotated[
-        str, Header(alias="X-User-ID", min_length=1, max_length=128)
-    ],
+async def current_user_id(
+    principal: Annotated[UserResponse, Depends(current_user)],
 ) -> str:
-    if not ID_PATTERN.fullmatch(user_id):
-        raise HTTPException(status_code=422, detail="Invalid X-User-ID header.")
-    return user_id
+    """Attempt routes use this instead of trusting a caller-supplied header,
+    so an attempt's owner is always whoever the bearer token authenticates
+    as, not an id the caller can pick.
+    """
+    return principal.id

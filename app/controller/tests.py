@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile
 
 from app.controller.dependencies import (
     ID_PATTERN,
+    current_user_id,
     get_attempt_service,
     get_catalog_service,
     require_api_key,
-    require_user_id,
 )
 from app.db import (
     AttemptStateError,
@@ -186,7 +186,7 @@ async def grade_fewshot(
 )
 async def create_attempt(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
-    user_id: Annotated[str, Depends(require_user_id)],
+    user_id: Annotated[str, Depends(current_user_id)],
     service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> Attempt:
     try:
@@ -208,7 +208,7 @@ async def create_attempt(
 )
 async def list_attempts(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
-    user_id: Annotated[str, Depends(require_user_id)],
+    user_id: Annotated[str, Depends(current_user_id)],
     service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> list[Attempt]:
     try:
@@ -226,7 +226,7 @@ async def grade_attempt(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     attempt_id: str,
     body: GradeAttemptRequest,
-    user_id: Annotated[str, Depends(require_user_id)],
+    user_id: Annotated[str, Depends(current_user_id)],
     service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> Attempt:
     """Saves the submitted answers and starts grading in the background.
@@ -257,7 +257,7 @@ async def grade_attempt(
 async def get_attempt_result(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     attempt_id: str,
-    user_id: Annotated[str, Depends(require_user_id)],
+    user_id: Annotated[str, Depends(current_user_id)],
     service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> AttemptGradeResponse:
     try:
