@@ -132,20 +132,21 @@ LLM invents that isn't in the question's rubric, or a score outside
 
 ## Run locally
 
-```bash
-cp .env.example .env
-docker compose up --build -d
-curl http://localhost:8002/health
-```
+### Prerequisites
 
-Grading requires a reachable OpenAI-compatible LLM endpoint (`LLM_URL`) —
-`/health` reports `llm` readiness by hitting that endpoint's `/models`
-route, and grading itself will fail per-response if it's unreachable. The
-default `.env.example` points at a local Ollama instance
-(`http://host.docker.internal:11434/v1/chat/completions`); to use it,
-install [Ollama](https://ollama.com), pull a model, and set `LLM_MODEL` to
-match. For local development a small model such as `qwen3:0.6b` is enough
-to exercise the grading flow end to end and starts up fast:
+- Docker and Docker Compose.
+- [Ollama](https://ollama.com), installed and running locally. Grading
+  requires a reachable OpenAI-compatible LLM endpoint (`LLM_URL`) —
+  `/health` reports `llm` readiness by hitting that endpoint's `/models`
+  route, and grading itself will fail per-response if it's unreachable. The
+  default `.env.example` points at Ollama's default address as seen from
+  inside the container (`http://host.docker.internal:11434/v1/chat/completions`),
+  so no separate container is needed — just the Ollama app/service running
+  on the host.
+
+Pull a model and point `LLM_MODEL` at it. For local development a small
+model such as `qwen3:0.6b` is enough to exercise the grading flow end to
+end and starts up fast:
 
 ```bash
 ollama pull qwen3:0.6b
@@ -153,6 +154,17 @@ ollama pull qwen3:0.6b
 ```
 
 Swap in a larger model for grading quality closer to production.
+
+### Start the stack
+
+```bash
+cp .env.example .env
+docker compose up --build -d
+curl http://localhost:8002/health
+```
+
+Check `/health`'s `llm` field — if it's `false`, Ollama isn't reachable at
+`LLM_URL` yet.
 
 Set strong, random values for `JWT_SECRET`, `STAFF_REGISTRATION_KEY`, and
 `POSTGRES_PASSWORD` before any non-development deployment. The JWT secret
