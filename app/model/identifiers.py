@@ -1,6 +1,6 @@
 import re
 
-# RAG and grading use this format for course, exam, rubric, question, and
+# Grading uses this format for course, exam, rubric, question, and
 # student identity hand-off values.
 CROSS_SERVICE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 USER_ID_PATTERN = r"^[0-9]+$"

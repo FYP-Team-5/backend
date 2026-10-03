@@ -18,7 +18,6 @@ from app.dto.grading import (
     CriterionGrade,
     FewShotGradingResult,
     GradingResult,
-    RetrievedRubricChunk,
 )
 from app.dto.health import HealthResponse
 from app.dto.user import (
@@ -47,7 +46,6 @@ __all__ = [
     "LoginRequest",
     "QuestionCreate",
     "QuestionResponseSubmission",
-    "RetrievedRubricChunk",
     "RubricCreate",
     "StaffRegistration",
     "StudentRegistration",

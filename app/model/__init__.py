@@ -14,7 +14,6 @@ from app.model.identifiers import (
     USER_ID_PATTERN,
     is_cross_service_id,
 )
-from app.model.rubric import RubricMetadata
 from app.model.user import Staff, Student, User
 
 __all__ = [
@@ -28,7 +27,6 @@ __all__ = [
     "Question",
     "Response",
     "Rubric",
-    "RubricMetadata",
     "Staff",
     "Student",
     "Test",

@@ -1,12 +1,5 @@
-from typing import Any
-
 from pydantic import BaseModel, Field, model_validator
 
-
-class RetrievedRubricChunk(BaseModel):
-    id: str
-    content: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 class CriterionGrade(BaseModel):
     criterion: str = Field(min_length=1)

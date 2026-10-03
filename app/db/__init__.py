@@ -6,16 +6,6 @@ from app.db.grading_repository import (
     GradingStoreError,
     PostgresGradingRepository,
 )
-from app.db.postgres_repository import (
-    MetadataStoreError,
-    PostgresRubricMetadataRepository,
-    RubricMetadataNotFoundError,
-)
-from app.db.qdrant_repository import (
-    QdrantPayloadError,
-    QdrantRubricChunkRepository,
-    QdrantStoreError,
-)
 from app.db.user_repository import (
     PostgresUserRepository,
     UserConflictError,
@@ -29,14 +19,8 @@ __all__ = [
     "GradingConflictError",
     "GradingRecordNotFoundError",
     "GradingStoreError",
-    "MetadataStoreError",
     "PostgresGradingRepository",
-    "PostgresRubricMetadataRepository",
     "PostgresUserRepository",
-    "QdrantPayloadError",
-    "QdrantRubricChunkRepository",
-    "QdrantStoreError",
-    "RubricMetadataNotFoundError",
     "UserConflictError",
     "UserNotFoundError",
     "UserStoreError",

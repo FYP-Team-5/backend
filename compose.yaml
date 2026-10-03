@@ -10,17 +10,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       API_KEY: ${API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      RAG_DATABASE_URL: postgresql+psycopg://${RAG_POSTGRES_USER:-rag}:${RAG_POSTGRES_PASSWORD:-rag}@postgres:5432/${RAG_POSTGRES_DB:-rag}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-change-me}@backend-postgres:5432/${POSTGRES_DB:-user}
       JWT_SECRET: ${JWT_SECRET:-development-only-change-me-at-least-32-bytes}
       JWT_ISSUER: ${JWT_ISSUER:-user-service}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-assessment-services}
       ACCESS_TOKEN_EXPIRY_MINUTES: ${ACCESS_TOKEN_EXPIRY_MINUTES:-30}
       STAFF_REGISTRATION_KEY: ${STAFF_REGISTRATION_KEY:-development-staff-bootstrap-key}
-      QDRANT_URL: http://qdrant:6333
-      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
-      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rubric_chunks}
-      QDRANT_TIMEOUT_SECONDS: ${QDRANT_TIMEOUT_SECONDS:-30}
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434/v1/chat/completions}
       LLM_MODEL: ${LLM_MODEL:-local-model}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -36,9 +31,6 @@ services:
     depends_on:
       backend-postgres:
         condition: service_healthy
-    networks:
-      - default
-      - rag_network
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8002/health"]
       interval: 15s
@@ -65,8 +57,3 @@ services:
 
 volumes:
   postgres_data:
-
-networks:
-  rag_network:
-    # external: true
-    name: rubric-rag_default
