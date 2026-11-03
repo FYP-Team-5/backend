@@ -74,4 +74,14 @@ async def current_user_id(
     so an attempt's owner is always whoever the bearer token authenticates
     as, not an id the caller can pick.
     """
+    if principal.role != "student":
+        raise HTTPException(status_code=403, detail="Student role is required.")
     return principal.id
+
+
+async def require_instructor(
+    principal: Annotated[UserResponse, Depends(current_user)],
+) -> UserResponse:
+    if principal.role != "instructor":
+        raise HTTPException(status_code=403, detail="Instructor role is required.")
+    return principal

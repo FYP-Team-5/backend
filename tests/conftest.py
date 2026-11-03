@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
-from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
 from app.db import (
@@ -13,6 +12,8 @@ from app.db import (
 )
 from app.main import create_app
 from app.service import GradingService, IdentityService, LocalLLMClient
+from app.service.dataset_service import DatasetService
+from tests.dataset_fakes import MemoryDatasetStorage
 
 
 @pytest.fixture
@@ -26,13 +27,11 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def engine() -> Iterator[Engine]:
-    """One engine shared by both repositories: anonymous in-memory SQLite
-    gives every separate engine its own private, empty database."""
+def engine(tmp_path) -> Iterator[Engine]:
+    """Share a file database while keeping worker and request connections separate."""
     engine = create_engine(
-        "sqlite+pysqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        f"sqlite+pysqlite:///{tmp_path / 'api.db'}",
+        connect_args={"check_same_thread": False, "timeout": 10},
     )
     try:
         yield engine
@@ -89,15 +88,52 @@ def grading_service(
 
 
 @pytest.fixture
+def dataset_storage():
+    return MemoryDatasetStorage()
+
+
+@pytest.fixture
+def dataset_service(settings, grading_repository, dataset_storage):
+    settings.dataset_poll_seconds = 0.05
+    return DatasetService(settings, grading_repository, storage=dataset_storage)
+
+
+@pytest.fixture
 def client(
     settings: Settings,
     identity_service: IdentityService,
     grading_service: GradingService,
+    dataset_service: DatasetService,
 ) -> Iterator[TestClient]:
     app = create_app(
         settings=settings,
         identity_service=identity_service,
         grading_service=grading_service,
+        dataset_service=dataset_service,
     )
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def instructor_headers(client: TestClient) -> dict[str, str]:
+    profile = {
+        "email": "instructor@example.edu",
+        "full_name": "Instructor",
+        "staff_number": "T1",
+        "password": "test-password-long-enough",
+    }
+    response = client.post(
+        "/api/v1/auth/register/staff",
+        json=profile,
+        headers={"X-Staff-Registration-Key": "test-staff-registration-key"},
+    )
+    assert response.status_code == 201
+    token = client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": profile["email"],
+            "password": profile["password"],
+        },
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}

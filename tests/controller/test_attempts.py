@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 
 STUDENT = {
@@ -20,15 +22,17 @@ def _login(client: TestClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-def _create_test_with_rubric(client: TestClient) -> str:
+def _create_test_with_rubric(client: TestClient, instructor_headers: dict) -> str:
     course_id = client.post(
         "/api/v1/courses",
         json={"course_code": "CS-101", "course_name": "Intro CS"},
     ).json()["id"]
     test = client.post(
         f"/api/v1/courses/{course_id}/tests",
+        headers=instructor_headers,
         json={
             "test_name": "Quiz 1",
+            "ends_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
             "max_attempts": 1,
             "questions": [
                 {
@@ -45,20 +49,20 @@ def _create_test_with_rubric(client: TestClient) -> str:
     return test["id"]
 
 
-def test_create_attempt_requires_a_bearer_token(client: TestClient) -> None:
-    test_id = _create_test_with_rubric(client)
+def test_create_attempt_requires_a_bearer_token(client: TestClient, instructor_headers: dict) -> None:
+    test_id = _create_test_with_rubric(client, instructor_headers)
 
     response = client.post(f"/api/v1/tests/{test_id}/attempts")
 
     assert response.status_code == 401
 
 
-def test_create_attempt_ignores_a_caller_supplied_user_id(client: TestClient) -> None:
+def test_create_attempt_ignores_a_caller_supplied_user_id(client: TestClient, instructor_headers: dict) -> None:
     """An attempt always belongs to whoever the bearer token authenticates
     as - a stale/forged X-User-ID header must not override that, since
     trusting it would let one student read or grade another's attempts.
     """
-    test_id = _create_test_with_rubric(client)
+    test_id = _create_test_with_rubric(client, instructor_headers)
     client.post("/api/v1/auth/register/student", json=STUDENT)
     student_id = client.post("/api/v1/auth/register/student", json=OTHER_STUDENT).json()["id"]
     token = _login(client, STUDENT["email"], STUDENT["password"])

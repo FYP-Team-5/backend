@@ -1,8 +1,14 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, UploadFile
+from pydantic import AwareDatetime, ValidationError
 
-from app.controller.dependencies import ID_PATTERN, get_catalog_service, require_api_key
+from app.controller.dependencies import (
+    ID_PATTERN,
+    get_catalog_service,
+    require_api_key,
+    require_instructor,
+)
 from app.db import (
     GradingConflictError,
     GradingRecordNotFoundError,
@@ -44,6 +50,7 @@ async def list_courses(
     "/{course_id}/tests",
     response_model=Test,
     status_code=201,
+    dependencies=[Depends(require_instructor)],
 )
 async def create_test(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -64,12 +71,14 @@ async def create_test(
     "/{course_id}/tests/csv",
     response_model=Test,
     status_code=201,
+    dependencies=[Depends(require_instructor)],
 )
 async def create_test_from_csv(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     service: Annotated[CatalogService, Depends(get_catalog_service)],
     file: Annotated[UploadFile, File()],
     test_name: Annotated[str, Form(min_length=1, max_length=300)],
+    ends_at: Annotated[AwareDatetime, Form()],
     max_attempts: Annotated[int, Form(ge=1, le=100)] = 1,
 ) -> Test:
     try:
@@ -77,7 +86,9 @@ async def create_test_from_csv(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=422, detail="CSV file must be UTF-8 encoded.") from exc
     try:
-        return await service.create_test_from_csv(course_id, test_name, max_attempts, content)
+        return await service.create_test_from_csv(course_id, test_name, max_attempts, content, ends_at)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CsvFormatError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GradingRecordNotFoundError as exc:

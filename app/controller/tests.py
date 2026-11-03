@@ -8,6 +8,7 @@ from app.controller.dependencies import (
     get_attempt_service,
     get_catalog_service,
     require_api_key,
+    require_instructor,
 )
 from app.db import (
     AttemptStateError,
@@ -54,6 +55,7 @@ async def get_test(
 @tests_router.put(
     "/{test_id}/questions/{question_id}/rubric",
     response_model=Question,
+    dependencies=[Depends(require_instructor)],
 )
 async def set_question_rubric(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -74,6 +76,7 @@ async def set_question_rubric(
 @tests_router.put(
     "/{test_id}/questions/{question_id}/grading-method",
     response_model=Question,
+    dependencies=[Depends(require_instructor)],
 )
 async def set_grading_method(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -96,6 +99,7 @@ async def set_grading_method(
 @tests_router.post(
     "/{test_id}/criteria/csv",
     response_model=Test,
+    dependencies=[Depends(require_instructor)],
 )
 async def upload_criteria_csv(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -123,6 +127,7 @@ async def upload_criteria_csv(
 @tests_router.post(
     "/{test_id}/examples/csv",
     response_model=Test,
+    dependencies=[Depends(require_instructor)],
 )
 async def upload_examples_csv(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -150,6 +155,7 @@ async def upload_examples_csv(
 @tests_router.post(
     "/{test_id}/questions/{question_id}/grade-fewshot",
     response_model=FewShotGradingResult,
+    dependencies=[Depends(require_instructor)],
     tags=["grading"],
 )
 async def grade_fewshot(
@@ -240,6 +246,8 @@ async def grade_attempt(
             status_code=404, detail="Test or attempt not found."
         ) from exc
     except AttemptStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except GradingConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except StudentAnswerTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc

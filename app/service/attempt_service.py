@@ -5,6 +5,15 @@ class AttemptService:
         self.core = core
 
     def __getattr__(self, name: str):
-        if name in {"create_attempt", "list_attempts", "grade_attempt", "get_attempt_result"}:
+        if name in {
+            "create_attempt",
+            "list_attempts",
+            "grade_attempt",
+            "get_attempt_result",
+            "retry_grading",
+            "get_submission",
+            "list_submissions",
+            "edit_submission",
+        }:
             return getattr(self.core, name)
         raise AttributeError(name)

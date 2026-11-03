@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -37,6 +38,7 @@ from app.model import (
     Rubric,
     Test,
 )
+from app.model.assessment import utc_datetime
 
 grading_metadata = MetaData()
 
@@ -57,6 +59,9 @@ tests = Table(
     Column("test_name", String(300), nullable=False),
     Column("max_attempts", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("ends_at", DateTime(timezone=True), nullable=True),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Column("ended_by", String(128), nullable=True),
 )
 
 rubrics = Table(
@@ -100,6 +105,9 @@ attempts = Table(
     Column("attempt_number", Integer, nullable=False),
     Column("status", String(32), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("submitted_at", DateTime(timezone=True), nullable=True),
+    Column("submission_version", Integer, nullable=False, default=0),
+    Column("revision", Integer, nullable=False, default=0),
     Column("graded_at", DateTime(timezone=True), nullable=True),
     Column("error", Text, nullable=True),
     UniqueConstraint(
@@ -119,6 +127,12 @@ responses = Table(
     Column("answer", Text, nullable=False),
     Column("score", Float, nullable=True),
     Column("feedback", Text, nullable=True),
+    Column("criterion_scores", JSON, nullable=True),
+    Column("original_score", Float, nullable=True),
+    Column("original_feedback", Text, nullable=True),
+    Column("overridden", Boolean, nullable=False, default=False),
+    Column("edited_by", String(128), nullable=True),
+    Column("edited_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
@@ -145,6 +159,39 @@ criteria_met = Table(
     Column("is_met", Boolean, nullable=False),
 )
 
+grading_jobs = Table(
+    "grading_jobs",
+    grading_metadata,
+    Column("id", String(36), primary_key=True),
+    Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
+    Column("submission_version", Integer, nullable=False),
+    Column("status", String(16), nullable=False, index=True),
+    Column("snapshot", JSON, nullable=False),
+    Column("request", JSON, nullable=False),
+    Column("claim_count", Integer, nullable=False, default=0),
+    Column("next_retry_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("lease_token", String(36), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("attempt_id", "submission_version", name="uq_grading_job_version"),
+)
+
+grade_changes = Table(
+    "grading_grade_changes",
+    grading_metadata,
+    Column("id", String(36), primary_key=True),
+    Column("response_id", ForeignKey("grading_responses.id"), nullable=False, index=True),
+    Column("editor_id", String(128), nullable=False),
+    Column("edited_at", DateTime(timezone=True), nullable=False),
+    Column("old_score", Float, nullable=False),
+    Column("new_score", Float, nullable=False),
+    Column("old_feedback", Text, nullable=True),
+    Column("new_feedback", Text, nullable=False),
+    Column("old_criterion_scores", JSON, nullable=True),
+    Column("new_criterion_scores", JSON, nullable=True),
+)
+
 
 class GradingStoreError(RuntimeError):
     pass
@@ -158,12 +205,18 @@ class GradingConflictError(ValueError):
     pass
 
 
-class AttemptLimitExceededError(ValueError):
+class AttemptLimitExceededError(GradingConflictError):
     pass
 
 
 class AttemptStateError(ValueError):
     pass
+
+def ensure_open(row) -> None:
+    if row["ended_at"] is not None or (
+        row["ends_at"] is not None and utc_datetime(row["ends_at"]) <= datetime.now(UTC)
+    ):
+        raise GradingConflictError("This test is closed. Results remain available.")
 
 
 class PostgresGradingRepository:
@@ -255,6 +308,7 @@ class PostgresGradingRepository:
                         course_id=course_id,
                         test_name=request.test_name,
                         max_attempts=request.max_attempts,
+                        ends_at=request.ends_at,
                         created_at=now,
                     )
                 )
@@ -316,7 +370,6 @@ class PostgresGradingRepository:
                 )
                 if question_row is None:
                     raise GradingRecordNotFoundError(question_id)
-                old_rubric_id = question_row["rubric_id"]
                 connection.execute(insert(rubrics).values(id=new_rubric_id))
                 connection.execute(
                     insert(criteria),
@@ -338,11 +391,7 @@ class PostgresGradingRepository:
                     .where(questions.c.id == question_id)
                     .values(**update_values)
                 )
-                if old_rubric_id is not None:
-                    connection.execute(
-                        delete(criteria).where(criteria.c.rubric_id == old_rubric_id)
-                    )
-                    connection.execute(delete(rubrics).where(rubrics.c.id == old_rubric_id))
+                # Historical jobs and criterion results still reference old rubrics.
         except IntegrityError as exc:
             raise GradingConflictError("Rubric identifiers already exist.") from exc
         return self._get_question(question_id)
@@ -471,6 +520,7 @@ class PostgresGradingRepository:
                 )
                 if test_row is None:
                     raise GradingRecordNotFoundError(test_id)
+                ensure_open(test_row)
                 used = connection.execute(
                     select(func.count())
                     .select_from(attempts)
@@ -603,7 +653,7 @@ class PostgresGradingRepository:
         statement = (
             select(responses, questions.c.position)
             .join(questions, questions.c.id == responses.c.question_id)
-            .where(responses.c.attempt_id == attempt_id, responses.c.score.isnot(None))
+            .where(responses.c.attempt_id == attempt_id)
             .order_by(questions.c.position)
         )
         with self.engine.connect() as connection:

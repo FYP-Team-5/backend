@@ -9,7 +9,10 @@ from app.dto.assessment import (
     QuestionCreate,
     QuestionResponseSubmission,
     RubricCreate,
+    StudentSubmissionSummary,
+    SubmissionGradeUpdate,
     TestCreate,
+    TestDeadlineUpdate,
 )
 from app.dto.auth import TokenClaims
 from app.dto.grading import (
@@ -49,7 +52,10 @@ __all__ = [
     "RubricCreate",
     "StaffRegistration",
     "StudentRegistration",
+    "StudentSubmissionSummary",
+    "SubmissionGradeUpdate",
     "TestCreate",
+    "TestDeadlineUpdate",
     "TokenClaims",
     "TokenResponse",
     "UserResponse",

@@ -1,0 +1,4 @@
+id,question,desired_answer,student_answer,criteria[],criteria_score[],criteria_max_score[],student_score
+1.1,What is a prototype?,A simulation of behaviour.,"A prototype simulates behaviour, for early feedback.","[""Mentions simulated behaviour""]",[1],[1],1
+1.1,What is a prototype?,A simulation of behaviour.,An unrelated answer.,"[""Mentions simulated behaviour""]",[0],[1],0
+1.1,What is a prototype?,A simulation of behaviour.,,"[""Mentions simulated behaviour""]",[0],[1],0

@@ -14,6 +14,8 @@ from app.controller import (
     tests_router,
     users_router,
 )
+from app.controller.submissions import router as submissions_router
+from app.controller.training_dataset import router as training_dataset_router
 from app.service import (
     AttemptService,
     AuthService,
@@ -22,6 +24,7 @@ from app.service import (
     IdentityService,
     UserService,
 )
+from app.service.dataset_service import DatasetService
 
 OPENAPI_TAGS = [
     {
@@ -56,10 +59,12 @@ def create_app(
     settings: Settings | None = None,
     identity_service: IdentityService | None = None,
     grading_service: GradingService | None = None,
+    dataset_service: DatasetService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     identity_service = identity_service or IdentityService(settings)
     grading_service = grading_service or GradingService(settings)
+    dataset_service = dataset_service or DatasetService(settings, grading_service.grading_store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -71,11 +76,13 @@ def create_app(
         app.state.identity_service = identity_service
         await identity_service.initialize()
         await grading_service.initialize()
+        await dataset_service.initialize()
         try:
             yield
         finally:
-            await identity_service.close()
+            await dataset_service.close()
             await grading_service.close()
+            await identity_service.close()
 
     app = FastAPI(
         title=settings.app_name,
@@ -93,6 +100,7 @@ def create_app(
     app.state.settings = settings
     app.state.identity_service = identity_service
     app.state.grading_service = grading_service
+    app.state.dataset_service = dataset_service
     app.state.auth_service = AuthService(identity_service)
     app.state.user_service = UserService(identity_service)
     app.state.catalog_service = CatalogService(grading_service)
@@ -103,12 +111,15 @@ def create_app(
         allow_credentials=settings.allowed_origins != ["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition", "ETag"],
     )
     app.include_router(health_router)
     app.include_router(auth_router, prefix=settings.api_v1_prefix)
     app.include_router(users_router, prefix=settings.api_v1_prefix)
     app.include_router(courses_router, prefix=settings.api_v1_prefix)
     app.include_router(tests_router, prefix=settings.api_v1_prefix)
+    app.include_router(submissions_router, prefix=settings.api_v1_prefix)
+    app.include_router(training_dataset_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:

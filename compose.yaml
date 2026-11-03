@@ -24,6 +24,20 @@ services:
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
       MAX_ANSWER_CHARACTERS: ${MAX_ANSWER_CHARACTERS:-50000}
+      GRADING_POLL_SECONDS: ${GRADING_POLL_SECONDS:-1}
+      GRADING_LEASE_SECONDS: ${GRADING_LEASE_SECONDS:-60}
+      GRADING_MAX_RETRIES: ${GRADING_MAX_RETRIES:-3}
+      GRADING_RETRY_SECONDS: ${GRADING_RETRY_SECONDS:-5}
+      DATASET_S3_ENDPOINT: http://seaweedfs:8333
+      DATASET_S3_BUCKET: ${DATASET_S3_BUCKET:-llm-training}
+      DATASET_S3_ACCESS_KEY: ${DATASET_S3_ACCESS_KEY:-fyp-training}
+      DATASET_S3_SECRET_KEY: ${DATASET_S3_SECRET_KEY:-development-only-training-secret}
+      DATASET_S3_REGION: ${DATASET_S3_REGION:-us-east-1}
+      DATASET_UPLOAD_MAX_BYTES: ${DATASET_UPLOAD_MAX_BYTES:-52428800}
+      DATASET_POLL_SECONDS: ${DATASET_POLL_SECONDS:-5}
+      DATASET_LEASE_SECONDS: ${DATASET_LEASE_SECONDS:-120}
+      DATASET_MAX_RETRIES: ${DATASET_MAX_RETRIES:-3}
+      DATASET_RETRY_SECONDS: ${DATASET_RETRY_SECONDS:-5}
     ports:
       - "${API_PORT:-8002}:8002"
     extra_hosts:
@@ -33,6 +47,25 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8002/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.52
+    command: ["mini", "-dir=/data", "-ip=seaweedfs", "-ip.bind=0.0.0.0"]
+    restart: unless-stopped
+    environment:
+      AWS_ACCESS_KEY_ID: ${DATASET_S3_ACCESS_KEY:-fyp-training}
+      AWS_SECRET_ACCESS_KEY: ${DATASET_S3_SECRET_KEY:-development-only-training-secret}
+      S3_BUCKET: ${DATASET_S3_BUCKET:-llm-training}
+    expose:
+      - "8333"
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:9333/cluster/status >/dev/null && curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8333/ | grep -Eq '^(200|403)$'"]
       interval: 15s
       timeout: 5s
       start_period: 30s
@@ -57,3 +90,4 @@ services:
 
 volumes:
   postgres_data:
+  seaweedfs_data:
