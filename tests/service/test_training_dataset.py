@@ -473,3 +473,109 @@ def test_feedback_only_edits_keep_label_provenance_and_do_not_add_versions(datas
         row = connection.execute(select(dataset_source_rows)).mappings().one()
     assert row["label_source"] == "llm"
     assert row["grade_revision"] > result.attempt.revision
+
+
+def test_export_retry_reports_current_reservation_during_reconciliation(dataset):
+    service, grader, test, storage = dataset
+    service.settings.dataset_max_retries = 0
+    submit(grader, test)
+    grader.workflow.end_test(test.id, "instructor")
+    storage.fail = True
+    drain(service)
+    failed = asyncio.run(service.export_status(test.id))
+    assert failed["status"] == "failed"
+    storage.fail = False
+    retried = asyncio.run(service.retry_export(test.id, "instructor"))
+    assert retried["status"] == "exporting"
+    assert retried["version_id"] != failed["version_id"]
+    service.repository.reconcile()
+    pending = asyncio.run(service.export_status(test.id))
+    assert pending["status"] == "exporting"
+    assert pending["version_id"] == retried["version_id"]
+    drain(service)
+    assert asyncio.run(service.export_status(test.id))["status"] == "completed"
+    assert len(download(service)[0]) == 1
+
+
+def test_source_changes_do_not_consume_storage_failure_retry_budget(dataset):
+    service, grader, test, storage = dataset
+    service.settings.dataset_max_retries = 0
+    attempt = submit(grader, test)
+    upload(service)
+    grader.workflow.end_test(test.id, "instructor")
+    result = asyncio.run(grader.get_submission(test.id, attempt.id))
+
+    def edit():
+        grader.workflow.edit_grades(
+            test.id,
+            attempt.id,
+            "instructor",
+            SubmissionGradeUpdate(
+                revision=result.attempt.revision,
+                responses=[
+                    {
+                        "response_id": result.responses[0].id,
+                        "score": 4,
+                        "feedback": "Corrected",
+                        "criterion_scores": [
+                            {"criteria_id": criterion.id, "score": 2}
+                            for criterion in test.questions[0].rubric.criteria
+                        ],
+                    }
+                ],
+            ),
+        )
+
+    storage.after_put = edit
+    drain(service)
+    rows, _ = download(service)
+    assert len(rows) == 2
+    assert rows[1]["student_score"] == 4
+    assert all(
+        version["status"] != "failed" for version in service.repository.list_versions()
+    )
+    assert asyncio.run(service.export_status(test.id))["status"] == "completed"
+
+
+def test_unchanged_closed_tests_reuse_the_ledger_and_grade_edits_invalidate_it(
+    dataset, monkeypatch
+):
+    service, grader, test, _ = dataset
+    attempt = submit(grader, test)
+    grader.workflow.end_test(test.id, "instructor")
+    drain(service)
+    original = service.repository._training_row
+
+    def unexpected_read(*args):
+        raise AssertionError(
+            "Unchanged submissions should reuse their validated ledger rows"
+        )
+
+    monkeypatch.setattr(service.repository, "_training_row", unexpected_read)
+    service.repository.reconcile()
+    assert len(download(service)[0]) == 1
+    monkeypatch.setattr(service.repository, "_training_row", original)
+    result = asyncio.run(grader.get_submission(test.id, attempt.id))
+    asyncio.run(
+        grader.edit_submission(
+            test.id,
+            attempt.id,
+            "instructor",
+            SubmissionGradeUpdate(
+                revision=result.attempt.revision,
+                responses=[
+                    {
+                        "response_id": result.responses[0].id,
+                        "score": 4,
+                        "feedback": "Corrected",
+                        "criterion_scores": [
+                            {"criteria_id": criterion.id, "score": 2}
+                            for criterion in test.questions[0].rubric.criteria
+                        ],
+                    }
+                ],
+            ),
+        )
+    )
+    drain(service)
+    assert download(service)[0][0]["student_score"] == 4

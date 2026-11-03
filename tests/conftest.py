@@ -23,6 +23,7 @@ def settings() -> Settings:
         jwt_secret="test-secret-that-is-long-enough-for-hs256",
         staff_registration_key="test-staff-registration-key",
         access_token_expiry_minutes=30,
+        seed_demo_users=False,
     )
 
 

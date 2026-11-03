@@ -18,7 +18,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
-    LargeBinary,
     String,
     Table,
     Text,
@@ -83,7 +82,6 @@ dataset_versions = Table(
     Column("checksum", String(64), nullable=True),
     Column("row_count", Integer, nullable=True),
     Column("byte_size", Integer, nullable=True),
-    Column("payload", LargeBinary, nullable=True),
     Column("staged_keys", JSON, nullable=False),
     Column("claim_count", Integer, nullable=False, default=0),
     Column("next_retry_at", DateTime(timezone=True), nullable=False),
@@ -228,6 +226,24 @@ class DatasetRepository:
             .one()
         )
 
+    @staticmethod
+    def _latest_retry(connection, version):
+        while version["status"] == "failed":
+            retry = (
+                connection.execute(
+                    select(dataset_versions)
+                    .where(dataset_versions.c.retry_of == version["id"])
+                    .order_by(dataset_versions.c.number.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if retry is None:
+                break
+            version = retry
+        return version
+
     def reserve_upload(self, rows, checksum, creator_id, filename, request_key):
         with self.engine.begin() as connection:
             dataset = self._dataset(connection)
@@ -347,6 +363,28 @@ class DatasetRepository:
                 ]
             )
             waiting = any(item["status"] == "grading" for item in latest.values())
+            previous = (
+                connection.execute(
+                    select(test_dataset_exports).where(
+                        test_dataset_exports.c.test_id == test["id"]
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if previous is not None and previous["fingerprint"] == fingerprint:
+                # Immutable accepted answers and revisioned edits let us reuse the source ledger.
+                states.append(
+                    {
+                        "test_id": test["id"],
+                        "fingerprint": fingerprint,
+                        "waiting": waiting,
+                        "rows": [],
+                        "excluded": previous["excluded"],
+                        "previous": previous,
+                    }
+                )
+                continue
             rows, excluded = [], []
             if not waiting:
                 for attempt in latest.values():
@@ -445,6 +483,7 @@ class DatasetRepository:
                     "waiting": waiting,
                     "rows": rows,
                     "excluded": excluded,
+                    "previous": previous,
                 }
             )
         return states
@@ -453,15 +492,7 @@ class DatasetRepository:
         states = self._collect(connection)
         dataset = self._dataset(connection)
         for state in states:
-            previous = (
-                connection.execute(
-                    select(test_dataset_exports).where(
-                        test_dataset_exports.c.test_id == state["test_id"]
-                    )
-                )
-                .mappings()
-                .first()
-            )
+            previous = state["previous"]
             if previous is None or previous["fingerprint"] != state["fingerprint"]:
                 if not state["waiting"]:
                     connection.execute(
@@ -509,7 +540,7 @@ class DatasetRepository:
                 .where(training_datasets.c.id == DATASET_ID)
                 .values(source_fingerprint=source_fingerprint)
             )
-        return {**dict(dataset), "source_fingerprint": source_fingerprint}, states
+        return {**dict(dataset), "source_fingerprint": source_fingerprint}
 
     @staticmethod
     def _rows(connection, seed):
@@ -521,12 +552,13 @@ class DatasetRepository:
             .all()
         )
         return seed + [item["row"] for item in sources], [
-            dict(item) for item in sources
+            {key: value for key, value in item.items() if key != "row"}
+            for item in sources
         ]
 
     def reconcile(self):
         with self.engine.begin() as connection:
-            dataset, _states = self._reconcile_locked(connection)
+            dataset = self._reconcile_locked(connection)
             rows, _ = self._rows(connection, dataset["seed_rows"])
             if not rows and dataset["active_version_id"] is None:
                 self._mark_exports(connection, None)
@@ -545,7 +577,9 @@ class DatasetRepository:
                 self._mark_exports(connection, active["id"])
                 return
             key = f"export:{dataset['active_version_id'] or 'empty'}:{checksum}"
-            version = self._reserve(connection, dataset, "test_export", key)
+            version = self._latest_retry(
+                connection, self._reserve(connection, dataset, "test_export", key)
+            )
             connection.execute(
                 update(test_dataset_exports)
                 .where(
@@ -640,7 +674,7 @@ class DatasetRepository:
 
     def prepare(self, job):
         with self.engine.begin() as connection:
-            dataset, _ = self._reconcile_locked(connection)
+            dataset = self._reconcile_locked(connection)
             version = self._owned(connection, job)
             seed = (
                 version["input_seed"]
@@ -663,7 +697,6 @@ class DatasetRepository:
                         status="unchanged",
                         lease_token=None,
                         lease_expires_at=None,
-                        payload=None,
                         last_error=None,
                     )
                 )
@@ -676,7 +709,6 @@ class DatasetRepository:
                 "source_fingerprint": dataset["source_fingerprint"],
                 "source_manifest": manifest,
                 "seed_snapshot": seed,
-                "payload": payload,
                 "object_key": key,
                 "checksum": checksum,
                 "row_count": len(rows),
@@ -695,11 +727,11 @@ class DatasetRepository:
                 )
                 .values(version_id=job["id"])
             )
-            return {**dict(version), **values}
+            return {**dict(version), **values, "payload": payload}
 
     def activate(self, job, prepared):
         with self.engine.begin() as connection:
-            dataset, _ = self._reconcile_locked(connection)
+            dataset = self._reconcile_locked(connection)
             version = self._owned(connection, job)
             if (
                 dataset["active_version_id"] != prepared["parent_version_id"]
@@ -713,6 +745,7 @@ class DatasetRepository:
                         lease_token=None,
                         lease_expires_at=None,
                         next_retry_at=datetime.now(UTC),
+                        claim_count=0,
                         last_error="Source grades changed; rebuilding the CSV.",
                     )
                 )
@@ -726,7 +759,6 @@ class DatasetRepository:
                 .values(
                     status="ready",
                     ready_at=datetime.now(UTC),
-                    payload=None,
                     lease_token=None,
                     lease_expires_at=None,
                     last_error=None,
@@ -829,6 +861,11 @@ class DatasetRepository:
                     retry_of=row["id"],
                 )
                 if result["status"] != "failed":
+                    connection.execute(
+                        update(test_dataset_exports)
+                        .where(test_dataset_exports.c.version_id == version_id)
+                        .values(version_id=result["id"], last_error=None)
+                    )
                     return version_metadata(result, dataset["active_version_id"])
                 # Retrying a failed retry reserves another number, preserving history.
                 row = result

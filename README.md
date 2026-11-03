@@ -14,7 +14,9 @@ documentation at `http://localhost:8002/docs`.
 | Identity | `GET /health`, `/api/v1/auth/*`, `/api/v1/users/*` | `Authorization: Bearer <jwt>` (public for register/login) |
 | Catalog & grading | `/api/v1/courses/*`, `/api/v1/tests/*` | Optional `X-API-Key` gate plus role-checked bearer tokens for test authoring, instructor actions, and student attempts |
 
-Catalog reads and course creation use the API-key gate. Test creation,
+Course listing uses the API-key gate. Reading tests also requires a verified
+bearer token; student views omit model answers, rubrics, and grading examples.
+Course and test creation,
 rubric/example updates, grading-method selection, ad-hoc grading, submission
 review, grade editing, deadline updates, and manual test closure also require a
 verified instructor bearer token. Student attempt routes require a verified
@@ -197,6 +199,27 @@ make test
 make down
 ```
 
+### Accounts created on startup
+
+The backend creates these accounts automatically when `SEED_DEMO_USERS=true`
+(the default). Use the email as the username on the frontend login page or with
+`POST /api/v1/auth/login`.
+
+| Role | Username (email) | Password |
+|---|---|---|
+| Student | `student@demo.example.com` | `StudentDemo123!` |
+| Instructor | `instructor@demo.example.com` | `InstructorDemo123!` |
+
+Passwords are stored as salted hashes. Startup creates missing accounts and
+preserves existing accounts, including their passwords, roles, profiles, and
+inactive status. Restarting the backend does not reset credentials or create
+duplicates. If either email already exists, use that account's existing password.
+
+These are public demo credentials. Set `SEED_DEMO_USERS=false` in the backend
+environment for deployments that should not create them. Disabling seeding
+preserves accounts already created; an instructor can deactivate them through
+the user administration API.
+
 ## User flows
 
 ### 1. Register a student
@@ -285,6 +308,7 @@ Staff cannot deactivate their own account.
 ```bash
 curl -X POST http://localhost:8002/api/v1/courses \
   -H "X-API-Key: <key>" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer <instructor-token>" \
   -d '{"course_code":"CS101","course_name":"Intro to CS"}'
 
 curl -X POST http://localhost:8002/api/v1/courses/<course_id>/tests/csv \
@@ -335,12 +359,12 @@ Grading runs in a persistent background job per submission — poll the last end
 | `GET` | `/api/v1/users` | Staff | List/filter users |
 | `GET` | `/api/v1/users/{user_id}` | Self or staff | Read a user profile |
 | `PATCH` | `/api/v1/users/{user_id}/status` | Staff | Activate/deactivate an account |
-| `POST` | `/api/v1/courses` | API key | Create a course |
+| `POST` | `/api/v1/courses` | API key + instructor token | Create a course |
 | `GET` | `/api/v1/courses` | API key | List courses |
 | `POST` | `/api/v1/courses/{course_id}/tests` | API key + instructor token | Create a test (JSON questions) |
 | `POST` | `/api/v1/courses/{course_id}/tests/csv` | API key + instructor token | Create a test from a questions CSV |
-| `GET` | `/api/v1/courses/{course_id}/tests` | API key | List a course's tests |
-| `GET` | `/api/v1/tests/{test_id}` | API key | Read a test and its questions |
+| `GET` | `/api/v1/courses/{course_id}/tests` | API key + bearer token | List tests with role-appropriate question details |
+| `GET` | `/api/v1/tests/{test_id}` | API key + bearer token | Read a test with role-appropriate question details |
 | `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/rubric` | API key + instructor token | Set a question's rubric |
 | `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/grading-method` | API key + instructor token | Force rubric vs. few-shot when both are attached |
 | `POST` | `/api/v1/tests/{test_id}/criteria/csv` | API key + instructor token | Bulk-attach rubrics from CSV |
@@ -370,6 +394,7 @@ Grading runs in a persistent background job per submission — poll the last end
 | `JWT_AUDIENCE` | `assessment-services` | Required downstream audience |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Token lifetime, 1–1440 minutes |
 | `STAFF_REGISTRATION_KEY` | development-only value | Staff account bootstrap secret |
+| `SEED_DEMO_USERS` | `true` | Create the documented demo student and instructor accounts if missing at startup |
 | `LLM_URL` | local Ollama chat-completions URL | OpenAI-compatible grading endpoint |
 | `LLM_MODEL` | `local-model` | Model name sent in grading requests |
 | `LLM_API_KEY` | unset | Bearer token for the LLM endpoint, if it requires one |
@@ -407,8 +432,8 @@ and `service/` directories, plus `conftest.py` for shared fixtures.
 
 ## Current limitations
 
-- Catalog reads and course creation still use only the API-key gate.
-  Test authoring and instructor review/mutations additionally verify the JWT
+- Course listing uses only the API-key gate. Test reads require a verified JWT;
+  course/test authoring and instructor review/mutations verify the instructor
   role. There is no course enrollment or instructor ownership model; instructor
   access is global and submission rosters include all registered students.
 - Tokens use a shared HS256 secret; there is no refresh token or
@@ -498,8 +523,10 @@ workflow prepares training data; it does not start model training.
 
 ### Publication and recovery
 
-Version reservations, seed data, source provenance, staged CSV payloads, leases,
-retry counters, and errors are durable in PostgreSQL. The worker transfers and
+Version reservations, seed rows, the generated-row ledger, source provenance,
+leases, retry counters, and errors are durable in PostgreSQL. CSV bytes are
+derived from that saved state for each transfer rather than duplicated as a
+database blob. The worker transfers and
 verifies immutable objects outside database transactions, then checks its lease,
 active parent, and source revisions before activating a ready version. Source
 changes during transfer cause a rebuild at a distinct checksum-based object key;

@@ -16,6 +16,7 @@ services:
       JWT_AUDIENCE: ${JWT_AUDIENCE:-assessment-services}
       ACCESS_TOKEN_EXPIRY_MINUTES: ${ACCESS_TOKEN_EXPIRY_MINUTES:-30}
       STAFF_REGISTRATION_KEY: ${STAFF_REGISTRATION_KEY:-development-staff-bootstrap-key}
+      SEED_DEMO_USERS: ${SEED_DEMO_USERS:-true}
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434/v1/chat/completions}
       LLM_MODEL: ${LLM_MODEL:-local-model}
       LLM_API_KEY: ${LLM_API_KEY:-}

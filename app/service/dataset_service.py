@@ -105,7 +105,7 @@ class DatasetService:
             if version["status"] == "failed":
                 await self.retry(version["id"], creator_id)
         self._wake.set()
-        return status
+        return await self.export_status(test_id)
 
     async def _worker(self):
         while True:

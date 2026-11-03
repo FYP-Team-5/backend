@@ -8,7 +8,14 @@ from app.db import (
     GradingConflictError,
     PostgresGradingRepository,
 )
-from app.dto import CriteriaCreate, QuestionCreate, RubricCreate, TestCreate
+from app.db.grading_workflow import GradingWorkflowRepository
+from app.dto import (
+    CriteriaCreate,
+    GradeAttemptRequest,
+    QuestionCreate,
+    RubricCreate,
+    TestCreate,
+)
 
 
 def make_repository() -> PostgresGradingRepository:
@@ -55,23 +62,35 @@ def test_catalog_attempt_and_grade_round_trip() -> None:
     assert len(question.rubric.criteria) == 2
 
     attempt = repository.create_attempt(test_id=test.id, user_id="student-1")
-    response_id = repository.save_response(
+    workflow = GradingWorkflowRepository(repository)
+    workflow.accept_submission(
+        test,
         attempt.id,
-        question.id,
-        "Economic pressure was the main cause.",
+        "student-1",
+        GradeAttemptRequest(
+            responses=[
+                {
+                    "question_id": question.id,
+                    "answer": "Economic pressure was the main cause.",
+                }
+            ]
+        ),
     )
-    repository.save_response_grade(
-        response_id=response_id,
-        score=8,
-        feedback="Good explanation.",
-        criteria_met_results=[
+    job = workflow.claim_job(60, 3)
+    response_id = repository.list_responses(attempt.id)[0].id
+    workflow.save_job_grade(
+        job,
+        response_id,
+        8,
+        "Good explanation.",
+        [
             {"criteria_id": question.rubric.criteria[0].id, "is_met": True},
             {"criteria_id": question.rubric.criteria[1].id, "is_met": False},
         ],
     )
-
+    workflow.finish_job(job)
     responses = repository.list_responses(attempt.id)
-    completed = repository.mark_attempt_graded(attempt.id)
+    completed = repository.get_attempt(attempt.id)
 
     assert responses[0].question_id == question.id
     assert responses[0].score == 8

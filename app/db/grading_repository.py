@@ -579,76 +579,6 @@ class PostgresGradingRepository:
             rows = connection.execute(statement).mappings().all()
         return [Attempt.model_validate(dict(row)) for row in rows]
 
-    def save_response(self, attempt_id: str, question_id: str, answer: str) -> str:
-        now = datetime.now(UTC)
-        with self.engine.begin() as connection:
-            row = connection.execute(
-                select(responses.c.id).where(
-                    responses.c.attempt_id == attempt_id,
-                    responses.c.question_id == question_id,
-                )
-            ).first()
-            if row is None:
-                response_id = str(uuid.uuid4())
-                connection.execute(
-                    insert(responses).values(
-                        id=response_id,
-                        attempt_id=attempt_id,
-                        question_id=question_id,
-                        answer=answer,
-                        score=None,
-                        feedback=None,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-            else:
-                response_id = str(row[0])
-                connection.execute(
-                    update(responses)
-                    .where(responses.c.id == response_id)
-                    .values(answer=answer, updated_at=now)
-                )
-        return response_id
-
-    def save_response_grade(
-        self,
-        *,
-        response_id: str,
-        score: float,
-        feedback: str,
-        criteria_met_results: list[dict],
-    ) -> None:
-        now = datetime.now(UTC)
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(responses)
-                .where(responses.c.id == response_id)
-                .values(score=score, feedback=feedback, updated_at=now)
-            )
-            if result.rowcount == 0:
-                raise GradingRecordNotFoundError(response_id)
-            connection.execute(
-                delete(criteria_met).where(criteria_met.c.response_id == response_id)
-            )
-            if criteria_met_results:
-                # An empty list here would make SQLAlchemy execute a single
-                # INSERT ... DEFAULT VALUES (it can't infer columns from zero
-                # dicts) instead of a no-op, so this must stay guarded —
-                # few-shot-graded responses always pass an empty list.
-                connection.execute(
-                    insert(criteria_met),
-                    [
-                        {
-                            "id": str(uuid.uuid4()),
-                            "response_id": response_id,
-                            "criteria_id": item["criteria_id"],
-                            "is_met": item["is_met"],
-                        }
-                        for item in criteria_met_results
-                    ],
-                )
-
     def list_responses(self, attempt_id: str) -> list[Response]:
         statement = (
             select(responses, questions.c.position)
@@ -675,50 +605,6 @@ class PostgresGradingRepository:
             self._to_response(row, grouped.get(row["id"], []))
             for row in response_rows
         ]
-
-    def mark_attempt_graded(self, attempt_id: str) -> Attempt:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(
-                    status="graded",
-                    graded_at=datetime.now(UTC),
-                    error=None,
-                )
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-        return self.get_attempt(attempt_id)
-
-    def mark_attempt_grading(self, attempt_id: str) -> Attempt:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="grading", error=None)
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-        return self.get_attempt(attempt_id)
-
-    def mark_attempt_in_progress(self, attempt_id: str) -> None:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="in_progress", error=None)
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-
-    def mark_attempt_failed(self, attempt_id: str, error: str) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="failed", error=error[:2000])
-            )
 
     @staticmethod
     def _course_exists(connection: Connection, course_id: str) -> bool:

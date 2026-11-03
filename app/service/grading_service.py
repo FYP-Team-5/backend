@@ -54,10 +54,6 @@ class StudentAnswerTooLargeError(ValueError):
     pass
 
 
-class IncompleteAttemptError(ValueError):
-    pass
-
-
 class UnknownQuestionError(ValueError):
     pass
 
@@ -297,7 +293,7 @@ class GradingService:
         request: GradeAttemptRequest,
     ) -> Attempt:
         attempt = await asyncio.to_thread(self.grading_store.get_attempt, attempt_id)
-        self._validate_attempt(attempt, test_id, user_id, allow_graded=True)
+        self._validate_attempt(attempt, test_id, user_id)
         test = await self.get_test(test_id)
         questions_by_id = {question.id: question for question in test.questions}
         normalized = request.model_copy(deep=True)
@@ -566,7 +562,7 @@ class GradingService:
         user_id: str,
     ) -> AttemptGradeResponse:
         attempt = await asyncio.to_thread(self.grading_store.get_attempt, attempt_id)
-        self._validate_attempt(attempt, test_id, user_id, allow_graded=True)
+        self._validate_attempt(attempt, test_id, user_id)
         test = await asyncio.to_thread(
             self.workflow.snapshot_for_attempt, attempt_id
         ) or await self.get_test(test_id)
@@ -628,13 +624,9 @@ class GradingService:
         attempt: Attempt,
         test_id: str,
         user_id: str,
-        *,
-        allow_graded: bool = False,
     ) -> None:
         if attempt.test_id != test_id or attempt.user_id != user_id:
             raise AttemptStateError("Attempt does not belong to this user and test.")
-        if attempt.status == "graded" and not allow_graded:
-            raise AttemptStateError("A finalized attempt cannot be changed.")
 
     @staticmethod
     def _grading_prompt(question: Question, answer: str) -> str:

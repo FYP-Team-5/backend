@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     jwt_audience: str = "assessment-services"
     access_token_expiry_minutes: int = Field(default=30, ge=1, le=1440)
     staff_registration_key: str = "development-staff-bootstrap-key"
+    seed_demo_users: bool = True
 
     @property
     def allowed_origins(self) -> list[str]:

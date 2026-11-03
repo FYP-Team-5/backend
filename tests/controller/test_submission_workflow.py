@@ -27,7 +27,9 @@ def student(client, number):
 
 def make_test(client, instructor_headers, **kwargs):
     course = client.post(
-        "/api/v1/courses", json={"course_code": "CS", "course_name": "Computer Science"}
+        "/api/v1/courses",
+        json={"course_code": "CS", "course_name": "Computer Science"},
+        headers=instructor_headers,
     ).json()
     payload = {
         "test_name": "Quiz",
@@ -248,3 +250,55 @@ def test_deadline_creation_and_updates_are_validated_and_role_protected(
         ).status_code
         == 422
     )
+
+
+def test_student_test_and_result_views_hide_instructor_material(
+    client, instructor_headers, grading_repository, llm_client
+):
+    from app.dto import ExampleCreate
+
+    llm_client.grade.return_value = CriteriaGradingResult(score=2, feedback="Feedback")
+    headers, _ = student(client, 1)
+    test = make_test(client, instructor_headers)
+    question = test["questions"][0]
+    grading_repository.set_question_examples(
+        test["id"],
+        question["id"],
+        [
+            ExampleCreate(
+                band="excellent", example_answer="Instructor exemplar", score=4
+            )
+        ],
+    )
+    grading_repository.set_grading_method(test["id"], question["id"], "rubric")
+    from app.dto import CriteriaCreate, RubricCreate
+
+    grading_repository.set_question_rubric(
+        test["id"],
+        question["id"],
+        RubricCreate(
+            model_answer="Instructor answer key",
+            criteria=[CriteriaCreate(description="Secret criterion", score=4)],
+        ),
+    )
+    base = f"/api/v1/tests/{test['id']}"
+    assert client.get(base).status_code == 401
+    instructor_view = client.get(base, headers=instructor_headers).json()
+    assert instructor_view["questions"][0]["model_answer"] == "Instructor answer key"
+    assert instructor_view["questions"][0]["rubric"] is not None
+    student_view = client.get(base, headers=headers).json()
+    listed = client.get(
+        f"/api/v1/courses/{test['course_id']}/tests", headers=headers
+    ).json()
+    attempt_id = submit(client, test, headers)
+    result = wait_for_result(client, test["id"], attempt_id, headers)
+    for questions in [
+        student_view["questions"],
+        listed[0]["questions"],
+        result["questions"],
+    ]:
+        assert questions[0]["model_answer"] is None
+        assert questions[0]["rubric"] is None
+        assert questions[0]["examples"] == []
+    assert result["responses"][0]["answer"] == "Saved answer"
+    assert result["responses"][0]["feedback"] == "Feedback"

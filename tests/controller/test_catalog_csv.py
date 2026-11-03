@@ -3,9 +3,10 @@ from datetime import UTC, datetime, timedelta
 from fastapi.testclient import TestClient
 
 
-def _create_course(client: TestClient) -> str:
+def _create_course(client: TestClient, instructor_headers: dict) -> str:
     response = client.post(
         "/api/v1/courses",
+        headers=instructor_headers,
         json={"course_code": "CS-101", "course_name": "Intro CS"},
     )
     assert response.status_code == 201
@@ -15,7 +16,7 @@ def _create_course(client: TestClient) -> str:
 def test_questions_csv_upload_creates_a_test(
     client: TestClient, instructor_headers: dict
 ) -> None:
-    course_id = _create_course(client)
+    course_id = _create_course(client, instructor_headers)
     csv_content = (
         "id,prompt,max_score,score_increment\n"
         "1.1,What is the role of a prototype program?,1,1\n"
@@ -42,7 +43,7 @@ def test_questions_csv_upload_creates_a_test(
 def test_criteria_csv_upload_attaches_rubric_and_model_answer(
     client: TestClient, instructor_headers: dict
 ) -> None:
-    course_id = _create_course(client)
+    course_id = _create_course(client, instructor_headers)
     questions_csv = (
         "id,prompt,max_score,score_increment\n1.1,What is a prototype?,1,1\n"
     )
@@ -78,7 +79,7 @@ def test_criteria_csv_upload_attaches_rubric_and_model_answer(
 def test_criteria_csv_upload_rejects_unknown_question_id(
     client: TestClient, instructor_headers: dict
 ) -> None:
-    course_id = _create_course(client)
+    course_id = _create_course(client, instructor_headers)
     questions_csv = (
         "id,prompt,max_score,score_increment\n1.1,What is a prototype?,1,1\n"
     )
@@ -107,7 +108,7 @@ def test_criteria_csv_upload_rejects_unknown_question_id(
 def test_questions_csv_upload_rejects_malformed_csv(
     client: TestClient, instructor_headers: dict
 ) -> None:
-    course_id = _create_course(client)
+    course_id = _create_course(client, instructor_headers)
 
     response = client.post(
         f"/api/v1/courses/{course_id}/tests/csv",
