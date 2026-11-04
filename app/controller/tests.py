@@ -4,11 +4,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile
 
 from app.controller.dependencies import (
     ID_PATTERN,
+    current_user,
     current_user_id,
     get_attempt_service,
     get_catalog_service,
     require_api_key,
+    require_instructor,
 )
+from app.controller.presenters import student_questions, test_view
 from app.db import (
     AttemptStateError,
     GradingConflictError,
@@ -22,6 +25,7 @@ from app.dto import (
     GradeAttemptRequest,
     GradingMethodUpdate,
     RubricCreate,
+    UserResponse,
 )
 from app.model import Attempt, Question, Test
 from app.service import (
@@ -42,11 +46,12 @@ tests_router = APIRouter(prefix="/tests", tags=["catalog"], dependencies=[Depend
 
 @tests_router.get("/{test_id}", response_model=Test)
 async def get_test(
+    principal: Annotated[UserResponse, Depends(current_user)],
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> Test:
     try:
-        return await service.get_test(test_id)
+        return test_view(await service.get_test(test_id), principal.role)
     except GradingRecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Test not found.") from exc
 
@@ -54,6 +59,7 @@ async def get_test(
 @tests_router.put(
     "/{test_id}/questions/{question_id}/rubric",
     response_model=Question,
+    dependencies=[Depends(require_instructor)],
 )
 async def set_question_rubric(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -74,6 +80,7 @@ async def set_question_rubric(
 @tests_router.put(
     "/{test_id}/questions/{question_id}/grading-method",
     response_model=Question,
+    dependencies=[Depends(require_instructor)],
 )
 async def set_grading_method(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -96,6 +103,7 @@ async def set_grading_method(
 @tests_router.post(
     "/{test_id}/criteria/csv",
     response_model=Test,
+    dependencies=[Depends(require_instructor)],
 )
 async def upload_criteria_csv(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -123,6 +131,7 @@ async def upload_criteria_csv(
 @tests_router.post(
     "/{test_id}/examples/csv",
     response_model=Test,
+    dependencies=[Depends(require_instructor)],
 )
 async def upload_examples_csv(
     test_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -150,6 +159,7 @@ async def upload_examples_csv(
 @tests_router.post(
     "/{test_id}/questions/{question_id}/grade-fewshot",
     response_model=FewShotGradingResult,
+    dependencies=[Depends(require_instructor)],
     tags=["grading"],
 )
 async def grade_fewshot(
@@ -241,6 +251,8 @@ async def grade_attempt(
         ) from exc
     except AttemptStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except GradingConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except StudentAnswerTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except UnknownQuestionError as exc:
@@ -261,7 +273,9 @@ async def get_attempt_result(
     service: Annotated[AttemptService, Depends(get_attempt_service)],
 ) -> AttemptGradeResponse:
     try:
-        return await service.get_attempt_result(test_id, attempt_id, user_id)
+        result = await service.get_attempt_result(test_id, attempt_id, user_id)
+        result.questions = student_questions(result.questions)
+        return result
     except GradingRecordNotFoundError as exc:
         raise HTTPException(
             status_code=404, detail="Test or attempt not found."

@@ -1,5 +1,6 @@
 import asyncio
 import re
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -66,14 +67,9 @@ def make_grading_store() -> PostgresGradingRepository:
 
 
 async def submit_and_wait(service, test_id, attempt_id, user_id, request):
-    """grade_attempt now returns as soon as responses are saved, before the
-    background LLM grading task finishes. Tests need the final result, so
-    this awaits that task (tracked in service._grading_tasks) before
-    fetching it via get_attempt_result."""
+    """Run the persisted worker job before asserting final grades."""
     await service.grade_attempt(test_id, attempt_id, user_id, request)
-    task = service._grading_tasks.get(attempt_id)
-    if task is not None:
-        await task
+    await service.process_pending_job()
     return await service.get_attempt_result(test_id, attempt_id, user_id)
 
 
@@ -82,7 +78,9 @@ def make_service(*, wrong_scale: bool = False):
     llm = FakeLLMClient(wrong_scale=wrong_scale)
     service = GradingService(Settings(), grading_store=grading_store, llm_client=llm)
     course = asyncio.run(
-        service.create_course(CourseCreate(course_code="HIST-101", course_name="History"))
+        service.create_course(
+            CourseCreate(course_code="HIST-101", course_name="History")
+        )
     )
     test = asyncio.run(
         service.create_test(
@@ -114,6 +112,7 @@ def make_service(*, wrong_scale: bool = False):
                         ),
                     ),
                 ],
+                ends_at=datetime.now(UTC) + timedelta(days=1),
             ),
         )
     )
@@ -254,8 +253,11 @@ def test_attempt_cannot_start_while_a_question_has_no_rubric() -> None:
                 test_name="Algebra quiz",
                 max_attempts=1,
                 questions=[
-                    QuestionCreate(prompt="Solve for x.", max_score=10, score_increment=1)
+                    QuestionCreate(
+                        prompt="Solve for x.", max_score=10, score_increment=1
+                    )
                 ],
+                ends_at=datetime.now(UTC) + timedelta(days=1),
             ),
         )
     )
@@ -267,7 +269,9 @@ def test_attempt_cannot_start_while_a_question_has_no_rubric() -> None:
         service.set_question_rubric(
             test.id,
             test.questions[0].id,
-            RubricCreate(criteria=[CriteriaCreate(description="Correct answer", score=10)]),
+            RubricCreate(
+                criteria=[CriteriaCreate(description="Correct answer", score=10)]
+            ),
         )
     )
     attempt = asyncio.run(service.create_attempt(test.id, "student-1"))
@@ -300,7 +304,9 @@ def test_grading_rejects_question_outside_the_test() -> None:
 def test_create_test_from_csv_creates_questions_with_external_ids() -> None:
     service, _, _, _ = make_service()
     course = asyncio.run(
-        service.create_course(CourseCreate(course_code="CS-101", course_name="Intro CS"))
+        service.create_course(
+            CourseCreate(course_code="CS-101", course_name="Intro CS")
+        )
     )
     csv_content = (
         "id,prompt,max_score,score_increment\n"
@@ -309,7 +315,13 @@ def test_create_test_from_csv_creates_questions_with_external_ids() -> None:
     )
 
     test = asyncio.run(
-        service.create_test_from_csv(course.id, "Quiz 1", 1, csv_content)
+        service.create_test_from_csv(
+            course.id,
+            "Quiz 1",
+            1,
+            csv_content,
+            ends_at=datetime.now(UTC) + timedelta(days=1),
+        )
     )
 
     assert [question.external_id for question in test.questions] == ["1.1", "1.2"]
@@ -319,7 +331,9 @@ def test_create_test_from_csv_creates_questions_with_external_ids() -> None:
 def test_upload_criteria_csv_attaches_rubric_and_model_answer_by_join_key() -> None:
     service, _, _, _ = make_service()
     course = asyncio.run(
-        service.create_course(CourseCreate(course_code="CS-101", course_name="Intro CS"))
+        service.create_course(
+            CourseCreate(course_code="CS-101", course_name="Intro CS")
+        )
     )
     test = asyncio.run(
         service.create_test_from_csv(
@@ -328,6 +342,7 @@ def test_upload_criteria_csv_attaches_rubric_and_model_answer_by_join_key() -> N
             1,
             "id,prompt,max_score,score_increment\n"
             "1.1,What is the role of a prototype program?,1,1\n",
+            ends_at=datetime.now(UTC) + timedelta(days=1),
         )
     )
     criteria_csv = (
@@ -347,7 +362,9 @@ def test_upload_criteria_csv_attaches_rubric_and_model_answer_by_join_key() -> N
 def test_upload_criteria_csv_rejects_unknown_question_id() -> None:
     service, _, _, _ = make_service()
     course = asyncio.run(
-        service.create_course(CourseCreate(course_code="CS-101", course_name="Intro CS"))
+        service.create_course(
+            CourseCreate(course_code="CS-101", course_name="Intro CS")
+        )
     )
     test = asyncio.run(
         service.create_test_from_csv(
@@ -355,6 +372,7 @@ def test_upload_criteria_csv_rejects_unknown_question_id() -> None:
             "Quiz 1",
             1,
             "id,prompt,max_score,score_increment\n1.1,Question one,1,1\n",
+            ends_at=datetime.now(UTC) + timedelta(days=1),
         )
     )
     criteria_csv = "id,criteria,criteria_max_score\n9.9,Some criterion,1\n"

@@ -32,12 +32,28 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=2048, ge=128, le=32_768)
 
     max_answer_characters: int = Field(default=50_000, ge=1_000, le=1_000_000)
+    grading_poll_seconds: float = Field(default=1, gt=0, le=60)
+    grading_lease_seconds: int = Field(default=60, ge=3, le=3600)
+    grading_max_retries: int = Field(default=3, ge=0, le=10)
+    grading_retry_seconds: float = Field(default=5, ge=0, le=3600)
+
+    dataset_s3_endpoint: str = "http://localhost:8333"
+    dataset_s3_bucket: str = "llm-training"
+    dataset_s3_access_key: str = "fyp-training"
+    dataset_s3_secret_key: str = "development-only-training-secret"
+    dataset_s3_region: str = "us-east-1"
+    dataset_upload_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1024)
+    dataset_poll_seconds: float = Field(default=5, gt=0, le=3600)
+    dataset_lease_seconds: int = Field(default=120, ge=3, le=3600)
+    dataset_max_retries: int = Field(default=3, ge=0, le=10)
+    dataset_retry_seconds: float = Field(default=5, ge=0, le=3600)
 
     jwt_secret: str = "development-only-change-me-at-least-32-bytes"
     jwt_issuer: str = "user-service"
     jwt_audience: str = "assessment-services"
     access_token_expiry_minutes: int = Field(default=30, ge=1, le=1440)
     staff_registration_key: str = "development-staff-bootstrap-key"
+    seed_demo_users: bool = True
 
     @property
     def allowed_origins(self) -> list[str]:

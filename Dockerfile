@@ -17,6 +17,7 @@ RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
 COPY app ./app
+COPY app/demo/criteria ./app/demo/criteria
 RUN chown -R app:app /app
 
 USER app

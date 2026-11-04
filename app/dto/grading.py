@@ -1,34 +1,16 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
-
-class CriterionGrade(BaseModel):
-    criterion: str = Field(min_length=1)
-    score: float = Field(ge=0)
-    max_score: float = Field(gt=0)
-    feedback: str = Field(min_length=1)
-    @model_validator(mode="after")
-    def validate_score(self) -> "CriterionGrade":
-        if self.score > self.max_score: raise ValueError("criterion score cannot exceed max_score")
-        return self
-
-class GradingResult(BaseModel):
-    score: float = Field(ge=0)
-    max_score: float = Field(gt=0)
-    feedback: str = Field(min_length=1)
-    criteria: list[CriterionGrade] = Field(default_factory=list)
-    @model_validator(mode="after")
-    def validate_score(self) -> "GradingResult":
-        if self.score > self.max_score: raise ValueError("score cannot exceed max_score")
-        return self
 
 class CriteriaMetResult(BaseModel):
     criteria_id: str = Field(min_length=1)
     is_met: bool
 
+
 class CriteriaGradingResult(BaseModel):
     score: float = Field(ge=0)
     feedback: str = Field(min_length=1)
     criteria_met: list[CriteriaMetResult] = Field(default_factory=list)
+
 
 class FewShotGradingResult(BaseModel):
     score: float = Field(ge=0)

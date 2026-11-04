@@ -27,7 +27,7 @@ async def get_me(
 async def list_users(
     principal: Annotated[UserResponse, Depends(current_user)],
     service: Annotated[UserService, Depends(get_user_service)],
-    role: Annotated[Literal["student", "staff"] | None, Query()] = None,
+    role: Annotated[Literal["student", "instructor"] | None, Query()] = None,
 ) -> list[UserResponse]:
     try:
         return await service.list_users(principal, role=role)

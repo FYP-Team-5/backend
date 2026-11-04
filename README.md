@@ -12,18 +12,15 @@ documentation at `http://localhost:8002/docs`.
 | Zone | Routes | Mechanism |
 |---|---|---|
 | Identity | `GET /health`, `/api/v1/auth/*`, `/api/v1/users/*` | `Authorization: Bearer <jwt>` (public for register/login) |
-| Catalog & grading | `/api/v1/courses/*`, `/api/v1/tests/*` | `X-API-Key` header, checked against `Settings.api_key` — skipped entirely if `API_KEY` is unset |
+| Catalog & grading | `/api/v1/courses/*`, `/api/v1/tests/*` | Optional `X-API-Key` gate plus role-checked bearer tokens for test authoring, instructor actions, and student attempts |
 
-The catalog/grading zone's course/test-authoring routes still don't
-validate the JWT — the `X-API-Key` alone gates them. Attempt routes
-(`/tests/{id}/attempts*`) are the exception: they additionally require the
-caller's own `Authorization: Bearer <jwt>`, and the attempt's owner is
-always taken from that token's `sub` claim via the `current_user_id`
-dependency, never from a caller-supplied id. Earlier this was an
-unauthenticated `X-User-ID` header, which let anyone holding the API key
-read or grade any user's attempts by simply naming a different id; that
-gap is closed now that the identity itself is a verified token, not a
-free-form header.
+Course listing uses the API-key gate. Reading tests also requires a verified
+bearer token; student views omit model answers, rubrics, and grading examples.
+Course and test creation,
+rubric/example updates, grading-method selection, ad-hoc grading, submission
+review, grade editing, deadline updates, and manual test closure also require a
+verified instructor bearer token. Student attempt routes require a verified
+student bearer token and always derive ownership from its user id.
 
 ## User model
 
@@ -105,15 +102,38 @@ breaks must be quoted; see [`demo/README.md`](../demo/README.md) for a
 worked example). All three CSV formats join rows to questions by an
 instructor-supplied `id` column, not by row position.
 
-**Attempt flow:** `POST /tests/{id}/attempts` (with the student's bearer
-token) creates an attempt owned by that token's user, failing fast if any
-question's grading method is unresolved.
-`POST /tests/{id}/attempts/{aid}/grade` saves the submitted answers and
-kicks off grading in a background asyncio task per response, returning
-immediately with the attempt in `grading` status — poll
-`GET /tests/{id}/attempts/{aid}` for the graded result. A single answer
-failing to grade (LLM error, invalid score) marks the whole attempt
-`failed` with an error message, but responses already scored are kept.
+**Attempt flow:** `POST /tests/{id}/attempts` creates an attempt for the
+student's bearer token, subject to the attempt limit, grading readiness, and
+test availability. `POST /tests/{id}/attempts/{aid}/grade` atomically saves the
+answers and a persistent grading job, returning immediately. Students can
+leave, list their attempts, and reopen the same result URL while grading runs.
+Submitted answers are immutable. Repeating the same accepted request is safe.
+
+The worker uses PostgreSQL row locks, renewable leases, and lease tokens.
+It saves each question's grade separately, retries transient failures with
+bounded exponential backoff, and recovers pending or expired work after a
+restart. Already graded questions are skipped, and stale workers cannot
+publish results. The accepted test/rubric/example snapshot is retained so
+catalog changes do not change an accepted submission's grading configuration.
+An interrupted LLM request may run again; persisted results are applied once.
+`POST /tests/{id}/attempts/{aid}/retry-grading` retries a failed job using saved
+answers, including after test closure.
+
+**Availability:** New tests require a future, timezone-aware `ends_at` through
+both JSON and CSV creation. Existing tests may have no deadline. Availability
+is computed on every server check: a test closes at or after its deadline or
+when an instructor ends it. Closure and submission acceptance share a
+transactional test lock. Closure blocks new attempts and answers while
+accepted grading, result viewing, and instructor grade editing remain
+available. Unsubmitted browser answers are not automatically submitted.
+
+**Instructor review:** The submissions endpoint lists every registered
+student, including those without a submission, with the latest submitted
+attempt and latest graded attempt separately. Instructors can edit per-question
+scores and feedback only on the latest graded submission. Writes validate
+score bounds/increments and an attempt revision; a stale edit returns 409.
+Original automated results and an audit of old/new values, editor, and time
+are retained. Totals and percentages reflect saved overrides immediately.
 
 `POST /tests/{id}/questions/{qid}/grade-fewshot` grades one ad-hoc answer
 against a question's few-shot examples without touching the attempt
@@ -178,6 +198,33 @@ make lint
 make test
 make down
 ```
+
+### Accounts created on startup
+
+The backend creates these accounts automatically when `SEED_DEMO_USERS=true`
+(the default). Use the email as the username on the frontend login page or with
+`POST /api/v1/auth/login`.
+
+| Role | Username (email) | Password |
+|---|---|---|
+| Student | `student@example.com` | `Password123!` |
+| Student | `student2@example.com` | `Password123!` |
+| Instructor | `instructor@example.com` | `Password123!` |
+
+When demo seeding is enabled, the backend also creates the `DEMO101` course
+with two identical tests and one completed graded attempt for each demo student
+in each test. The first student receives 10/10 and the second receives 8/10,
+which provides data for student history and instructor submission views.
+
+Passwords are stored as salted hashes. Startup creates missing accounts and
+preserves existing accounts, including their passwords, roles, profiles, and
+inactive status. Restarting the backend does not reset credentials or create
+duplicates. If either email already exists, use that account's existing password.
+
+These are public demo credentials. Set `SEED_DEMO_USERS=false` in the backend
+environment for deployments that should not create them. Disabling seeding
+preserves accounts already created; an instructor can deactivate them through
+the user administration API.
 
 ## User flows
 
@@ -267,17 +314,20 @@ Staff cannot deactivate their own account.
 ```bash
 curl -X POST http://localhost:8002/api/v1/courses \
   -H "X-API-Key: <key>" -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer <instructor-token>" \
   -d '{"course_code":"CS101","course_name":"Intro to CS"}'
 
 curl -X POST http://localhost:8002/api/v1/courses/<course_id>/tests/csv \
   -H "X-API-Key: <key>" \
-  -F "file=@questions.csv;type=text/csv" -F "test_name=Quiz 1" -F "max_attempts=1"
+  -H "Authorization: Bearer <instructor-token>" \
+  -F "file=@questions.csv;type=text/csv" -F "test_name=Quiz 1" -F "max_attempts=1" \
+  -F "ends_at=<future-ISO-8601-timestamp-with-timezone>"
 
 curl -X POST http://localhost:8002/api/v1/tests/<test_id>/criteria/csv \
-  -H "X-API-Key: <key>" -F "file=@criteria.csv;type=text/csv"
+  -H "X-API-Key: <key>" -H "Authorization: Bearer <instructor-token>" -F "file=@criteria.csv;type=text/csv"
 
 curl -X POST http://localhost:8002/api/v1/tests/<test_id>/examples/csv \
-  -H "X-API-Key: <key>" -F "file=@examples.csv;type=text/csv"
+  -H "X-API-Key: <key>" -H "Authorization: Bearer <instructor-token>" -F "file=@examples.csv;type=text/csv"
 ```
 
 See [`demo/README.md`](../demo/README.md) for ready-made sample CSVs and
@@ -300,7 +350,7 @@ curl http://localhost:8002/api/v1/tests/<test_id>/attempts/<attempt_id> \
   -H "X-API-Key: <key>" -H "Authorization: Bearer <student-token>"
 ```
 
-Grading runs in the background per response — poll the last endpoint until
+Grading runs in a persistent background job per submission — poll the last endpoint until
 `attempt.status` is `graded` or `failed`.
 
 ## API reference
@@ -315,21 +365,27 @@ Grading runs in the background per response — poll the last endpoint until
 | `GET` | `/api/v1/users` | Staff | List/filter users |
 | `GET` | `/api/v1/users/{user_id}` | Self or staff | Read a user profile |
 | `PATCH` | `/api/v1/users/{user_id}/status` | Staff | Activate/deactivate an account |
-| `POST` | `/api/v1/courses` | API key | Create a course |
+| `POST` | `/api/v1/courses` | API key + instructor token | Create a course |
 | `GET` | `/api/v1/courses` | API key | List courses |
-| `POST` | `/api/v1/courses/{course_id}/tests` | API key | Create a test (JSON questions) |
-| `POST` | `/api/v1/courses/{course_id}/tests/csv` | API key | Create a test from a questions CSV |
-| `GET` | `/api/v1/courses/{course_id}/tests` | API key | List a course's tests |
-| `GET` | `/api/v1/tests/{test_id}` | API key | Read a test and its questions |
-| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/rubric` | API key | Set a question's rubric |
-| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/grading-method` | API key | Force rubric vs. few-shot when both are attached |
-| `POST` | `/api/v1/tests/{test_id}/criteria/csv` | API key | Bulk-attach rubrics from CSV |
-| `POST` | `/api/v1/tests/{test_id}/examples/csv` | API key | Bulk-attach few-shot examples from CSV |
-| `POST` | `/api/v1/tests/{test_id}/questions/{question_id}/grade-fewshot` | API key | Ad-hoc few-shot grading, not persisted |
+| `POST` | `/api/v1/courses/{course_id}/tests` | API key + instructor token | Create a test (JSON questions) |
+| `POST` | `/api/v1/courses/{course_id}/tests/csv` | API key + instructor token | Create a test from a questions CSV |
+| `GET` | `/api/v1/courses/{course_id}/tests` | API key + bearer token | List tests with role-appropriate question details |
+| `GET` | `/api/v1/tests/{test_id}` | API key + bearer token | Read a test with role-appropriate question details |
+| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/rubric` | API key + instructor token | Set a question's rubric |
+| `PUT` | `/api/v1/tests/{test_id}/questions/{question_id}/grading-method` | API key + instructor token | Force rubric vs. few-shot when both are attached |
+| `POST` | `/api/v1/tests/{test_id}/criteria/csv` | API key + instructor token | Bulk-attach rubrics from CSV |
+| `POST` | `/api/v1/tests/{test_id}/examples/csv` | API key + instructor token | Bulk-attach few-shot examples from CSV |
+| `POST` | `/api/v1/tests/{test_id}/questions/{question_id}/grade-fewshot` | API key + instructor token | Ad-hoc few-shot grading, not persisted |
 | `POST` | `/api/v1/tests/{test_id}/attempts` | API key + bearer token | Start an attempt for the token's user |
 | `GET` | `/api/v1/tests/{test_id}/attempts` | API key + bearer token | List the token's user's attempts |
 | `POST` | `/api/v1/tests/{test_id}/attempts/{attempt_id}/grade` | API key + bearer token | Submit answers, start background grading |
 | `GET` | `/api/v1/tests/{test_id}/attempts/{attempt_id}` | API key + bearer token | Read attempt status and graded responses |
+| `GET` | `/api/v1/tests/{test_id}/submissions` | API key + instructor token | Latest submissions for all registered students |
+| `GET` | `/api/v1/tests/{test_id}/submissions/{attempt_id}` | API key + instructor token | Review a submitted attempt |
+| `PATCH` | `/api/v1/tests/{test_id}/submissions/{attempt_id}/grades` | API key + instructor token | Update scores/feedback with `revision` and response ids |
+| `PATCH` | `/api/v1/tests/{test_id}/deadline` | API key + instructor token | Update an open test's `ends_at` |
+| `POST` | `/api/v1/tests/{test_id}/end` | API key + instructor token | End a test idempotently |
+| `POST` | `/api/v1/tests/{test_id}/attempts/{attempt_id}/retry-grading` | API key + student token | Retry saved answers on a failed job |
 
 ## Configuration
 
@@ -344,10 +400,15 @@ Grading runs in the background per response — poll the last endpoint until
 | `JWT_AUDIENCE` | `assessment-services` | Required downstream audience |
 | `ACCESS_TOKEN_EXPIRY_MINUTES` | `30` | Token lifetime, 1–1440 minutes |
 | `STAFF_REGISTRATION_KEY` | development-only value | Staff account bootstrap secret |
+| `SEED_DEMO_USERS` | `true` | Create the documented demo student and instructor accounts if missing at startup |
 | `LLM_URL` | local Ollama chat-completions URL | OpenAI-compatible grading endpoint |
 | `LLM_MODEL` | `local-model` | Model name sent in grading requests |
 | `LLM_API_KEY` | unset | Bearer token for the LLM endpoint, if it requires one |
 | `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` / `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | `120` / `1` / `0` / `2048` | LLM request tuning |
+| `GRADING_POLL_SECONDS` | `1` | Pending/expired job scan interval |
+| `GRADING_LEASE_SECONDS` | `60` | Worker lease duration, renewed every third of this interval |
+| `GRADING_MAX_RETRIES` | `3` | Automatic retries after the initial claim; expired leases also count |
+| `GRADING_RETRY_SECONDS` | `5` | Base delay for exponential retry backoff |
 | `MAX_ANSWER_CHARACTERS` | `50000` | Longest student answer accepted before grading rejects it |
 | `CORS_ORIGINS` | `*` | Comma-separated frontend origins |
 | `LOG_LEVEL` | `INFO` | Application log level |
@@ -377,12 +438,10 @@ and `service/` directories, plus `conftest.py` for shared fixtures.
 
 ## Current limitations
 
-- The catalog/grading zone's course/test-authoring routes (`X-API-Key`
-  only) still don't verify the caller's JWT or role — anything holding the
-  API key can create courses/tests and attach rubrics. Attempt routes are
-  the exception and now require the caller's own bearer token. It's
-  designed to sit behind a trusted backend or gateway, not to be exposed
-  directly.
+- Course listing uses only the API-key gate. Test reads require a verified JWT;
+  course/test authoring and instructor review/mutations verify the instructor
+  role. There is no course enrollment or instructor ownership model; instructor
+  access is global and submission rosters include all registered students.
 - Tokens use a shared HS256 secret; there is no refresh token or
   logout/revocation list beyond checking `active` on every request.
 - Student self-registration is unrestricted beyond uniqueness and field
@@ -390,5 +449,155 @@ and `service/` directories, plus `conftest.py` for shared fixtures.
 - Database tables are created at startup with SQLAlchemy metadata
   (`create_all`); there are no versioned migrations, so schema changes
   require manually recreating affected tables in any pre-existing database.
-- Rate limiting, password reset, multi-factor authentication, and audit
-  logging are not implemented.
+- Rate limiting, password reset, multi-factor authentication, and general
+  account audit logging are not implemented. Instructor grade-change auditing is implemented.
+
+
+## PostgreSQL concurrency verification
+
+The normal test suite uses fresh SQLite databases. To exercise real row locks,
+set `TEST_DATABASE_URL` to a disposable PostgreSQL database and run:
+
+```bash
+TEST_DATABASE_URL=postgresql+psycopg://... python -m pytest tests/db/test_grading_postgres.py -q
+```
+
+These tests create a random schema per test and remove it afterward. They cover
+worker claims, duplicate submissions, attempt limits, closure/acceptance races,
+and grade-edit/completion races. The database role needs schema-creation rights.
+No migration files or database reset commands are added by this change; update
+schema definitions and initialize a fresh database through `create_all()`.
+
+
+## SeaweedFS and versioned training CSVs
+
+The backend Compose stack includes `chrislusf/seaweedfs:4.52`, running the
+single-process `mini` service with S3, persistent data and filer metadata under
+`/data`, and a named `seaweedfs_data` volume. Its S3 endpoint is internal to the
+Compose network at `http://seaweedfs:8333`; storage credentials stay on the backend.
+The pinned image and flags follow the
+[SeaweedFS 4.52 implementation](https://github.com/seaweedfs/seaweedfs/blob/4.52/weed/command/mini.go).
+
+Configure `DATASET_S3_ACCESS_KEY`, `DATASET_S3_SECRET_KEY`, and
+`DATASET_S3_BUCKET` in `.env`, then start the backend stack as usual. The API
+starts independently of storage availability. `/health` reports cached
+`seaweedfs` readiness separately; unavailable dataset storage does not make
+otherwise healthy identity/grading services fail their health check.
+
+Instructors open **Training dataset** from the dashboard to upload a CSV, browse
+version history, download the latest or historical CSV, or retry a failed
+publication. Each ready version has an immutable object key and SHA-256 checksum.
+A new upload replaces the seed examples while retaining automatically collected
+test rows. Re-uploading an exact previously published snapshot recognizes its
+seed snapshot and avoids importing its generated rows a second time.
+
+The CSV contract matches
+`qlora/Datasets/training_data_moh_eng_rubrics.csv` in the sibling QLoRA checkout:
+
+```csv
+id,question,desired_answer,student_answer,criteria[],criteria_score[],criteria_max_score[],student_score
+```
+
+Array cells contain JSON arrays quoted by the CSV writer. UTF-8 BOMs, quoted
+commas, multiline fields, and repeated question ids are supported. Scores must
+be finite, within criterion maxima, and add up to `student_score`. Blank student
+answers are accepted with zero scores, matching the reference dataset. Dataset
+files remain CSV; provenance, source revisions, and job metadata live in
+PostgreSQL. Student names, emails, and institutional numbers are not added to CSVs.
+
+### Automatic collection
+
+The dataset worker periodically scans closed tests, including deadlines that
+expire without any page request. It selects each student's latest submitted
+attempt and waits for accepted grading to settle. It exports complete, graded
+latest attempts; failed/latest-pending submissions never cause an older graded
+attempt to be used instead. Failed grading can later be retried and included.
+
+Each eligible question contributes one row using its accepted rubric snapshot.
+Automatically generated rows have stable source identities in a separate ledger,
+so repeated scans or worker recovery do not append duplicate rows. Instructor
+corrections after closure create a new CSV version with corrected rows while
+historical versions remain unchanged. Distinct students with identical answers
+remain distinct examples.
+
+Criterion scores must match the saved aggregate grade. Submission review now
+allows per-criterion corrections, including partial credit. Aggregate-only
+changes that disagree with criterion labels, incomplete labels, and questions
+without an accepted rubric are reported as excluded rows with actionable reasons.
+They are collected automatically after valid labels are saved. The dataset
+workflow prepares training data; it does not start model training.
+
+### Publication and recovery
+
+Version reservations, seed rows, the generated-row ledger, source provenance,
+leases, retry counters, and errors are durable in PostgreSQL. CSV bytes are
+derived from that saved state for each transfer rather than duplicated as a
+database blob. The worker transfers and
+verifies immutable objects outside database transactions, then checks its lease,
+active parent, and source revisions before activating a ready version. Source
+changes during transfer cause a rebuild at a distinct checksum-based object key;
+ready objects are never overwritten. Superseded staging objects are cleaned up
+after publication. Downloads verify actual stored bytes before streaming a CSV.
+
+Only one publisher can own the dataset lease. Pending/expired work is recovered
+on startup, transient failures receive bounded backoff, and explicit retry
+reserves a new version without rewriting failed history. If an automatic
+reservation becomes redundant after another publication, its status is
+`unchanged` and it does not create another ready CSV. Storage failures leave the
+current ready version available and do not cancel quiz grading or test closure.
+
+All routes below require an instructor bearer token and the API key if configured:
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/v1/training-dataset/status` | Check storage readiness |
+| POST | `/api/v1/training-dataset/versions` | Upload multipart `.csv`; optional `Idempotency-Key`; returns 202 |
+| GET | `/api/v1/training-dataset/versions` | Read version history and active version |
+| GET | `/api/v1/training-dataset/versions/{id}` | Read version metadata/status |
+| GET | `/api/v1/training-dataset/versions/{id}/download` | Download a ready historical CSV |
+| GET | `/api/v1/training-dataset/download` | Download the latest ready CSV |
+| POST | `/api/v1/training-dataset/versions/{id}/retry` | Retry failed publication |
+| GET | `/api/v1/tests/{id}/training-export` | Read export progress, exclusions, errors, and version |
+| POST | `/api/v1/tests/{id}/training-export/retry` | Retry the test's failed publication |
+
+Grade edits additionally accept `criterion_scores` on each changed response:
+
+```json
+{"revision": 2, "responses": [{"response_id": "response-id", "score": 2,
+  "feedback": "Reviewed", "criterion_scores": [{"criteria_id": "criterion-id", "score": 2}]}]}
+```
+
+Provide exactly one score per accepted rubric criterion when correcting criterion
+labels. Omit `criterion_scores` for feedback/aggregate-only edits. Totals must
+still satisfy the question's score bounds and increment.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATASET_S3_ENDPOINT` | `http://localhost:8333` | Host-run S3 endpoint; Compose supplies the internal endpoint |
+| `DATASET_S3_BUCKET` | `llm-training` | Dataset bucket |
+| `DATASET_S3_ACCESS_KEY` | Development value | Backend-only S3 access key |
+| `DATASET_S3_SECRET_KEY` | Development value | Backend-only S3 secret |
+| `DATASET_S3_REGION` | `us-east-1` | S3 signing region |
+| `DATASET_UPLOAD_MAX_BYTES` | `52428800` | Maximum uploaded CSV size |
+| `DATASET_POLL_SECONDS` | `5` | Closed-test reconciliation/pending-job interval |
+| `DATASET_LEASE_SECONDS` | `120` | Publication lease, renewed every third of this interval |
+| `DATASET_MAX_RETRIES` | `3` | Automatic retries after the initial claim |
+| `DATASET_RETRY_SECONDS` | `5` | Base exponential retry delay |
+
+### Dataset integration tests
+
+The regular suite uses an in-memory storage fake. PostgreSQL and SeaweedFS tests
+are opt-in and target disposable test services:
+
+```bash
+TEST_DATABASE_URL='postgresql+psycopg://...' \
+DATASET_TEST_S3_ENDPOINT=http://127.0.0.1:18333 \
+DATASET_TEST_S3_ACCESS_KEY=... DATASET_TEST_S3_SECRET_KEY=... \
+python -m pytest -q
+```
+
+PostgreSQL tests use random schemas. SeaweedFS tests use random buckets and clean
+up their own objects. If the QLoRA checkout is present, round-trip tests use all
+3,778 reference rows; otherwise they use the committed small reference fixture.
+No migration or database reset commands are added. Initialize a fresh schema
+with the existing `create_all()` approach.

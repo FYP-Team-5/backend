@@ -6,6 +6,8 @@ class CatalogService:
 
     def __getattr__(self, name: str):
         if name in {
+            "set_deadline",
+            "end_test",
             "create_course",
             "list_courses",
             "create_test",

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.controller.dependencies import get_grading_service, get_identity_service
 from app.dto import (
@@ -15,6 +15,7 @@ health_router = APIRouter(tags=["health"])
 
 @health_router.get("/health", response_model=HealthResponse)
 async def health(
+    request: Request,
     identity_service: Annotated[IdentityService, Depends(get_identity_service)],
     grading_service: Annotated[GradingService, Depends(get_grading_service)],
 ) -> HealthResponse:
@@ -33,4 +34,5 @@ async def health(
         postgres="ok",
         llm="ok",
         model=grading_service.settings.llm_model,
+        seaweedfs=request.app.state.dataset_service.storage_status,
     )

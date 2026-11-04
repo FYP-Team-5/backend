@@ -5,7 +5,7 @@ import secrets
 from typing import Literal
 
 from app.config import Settings
-from app.db import PostgresUserRepository, UserNotFoundError
+from app.db import PostgresUserRepository, UserConflictError, UserNotFoundError
 from app.dto import (
     StaffRegistration,
     StudentRegistration,
@@ -51,6 +51,60 @@ class IdentityService:
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self.repository.initialize)
+        if self.settings.seed_demo_users:
+            await self._seed_demo_users()
+
+    async def _seed_demo_users(self) -> None:
+        accounts = (
+            (
+                StudentRegistration(
+                    email="student@example.com",
+                    full_name="Demo Student",
+                    student_number="DEMO-STUDENT",
+                    password="Password123!",
+                ),
+                self.repository.create_student,
+            ),
+            (
+                StudentRegistration(
+                    email="student2@example.com",
+                    full_name="Demo Student 2",
+                    student_number="DEMO-STUDENT-2",
+                    password="Password123!",
+                ),
+                self.repository.create_student,
+            ),
+            (
+                StaffRegistration(
+                    email="instructor@example.com",
+                    full_name="Demo Instructor",
+                    staff_number="DEMO-INSTRUCTOR",
+                    password="Password123!",
+                ),
+                self.repository.create_staff,
+            ),
+        )
+        for request, create_user in accounts:
+            try:
+                await asyncio.to_thread(self.repository.get_by_email, request.email)
+            except UserNotFoundError:
+                pass
+            else:
+                # Preserve existing credentials, profiles, roles, and inactive status.
+                continue
+            password_hash = await asyncio.to_thread(
+                self.password_hasher.hash, request.password
+            )
+            try:
+                await asyncio.to_thread(
+                    create_user,
+                    **request.model_dump(exclude={"password"}),
+                    password_hash=password_hash,
+                )
+            except UserConflictError:
+                # Another backend process may have created this account during startup.
+                # An unrelated institutional-number collision must still fail visibly.
+                await asyncio.to_thread(self.repository.get_by_email, request.email)
 
     async def close(self) -> None:
         await asyncio.to_thread(self.repository.close)

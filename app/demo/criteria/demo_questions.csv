@@ -1,0 +1,4 @@
+id,prompt,max_score,score_increment,model_answer
+1.1,What is the role of a prototype program in problem solving?,1,1,To simulate the behaviour of portions of the desired software product.
+1.2,What stages in the software life cycle are influenced by the testing stage?,2,1,"The coding/implementation stage and the solution refinement stage."
+1.6,Where are variables declared in a C++ program?,3,1,"Variables can be declared anywhere in the program: local variables inside functions, and global variables outside functions."

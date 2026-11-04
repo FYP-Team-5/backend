@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -19,7 +20,9 @@ from sqlalchemy import (
     delete,
     func,
     insert,
+    inspect,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import Connection, Engine, RowMapping
@@ -37,6 +40,7 @@ from app.model import (
     Rubric,
     Test,
 )
+from app.model.assessment import utc_datetime
 
 grading_metadata = MetaData()
 
@@ -57,6 +61,10 @@ tests = Table(
     Column("test_name", String(300), nullable=False),
     Column("max_attempts", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("starts_at", DateTime(timezone=True), nullable=True),
+    Column("ends_at", DateTime(timezone=True), nullable=True),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Column("ended_by", String(128), nullable=True),
 )
 
 rubrics = Table(
@@ -100,6 +108,9 @@ attempts = Table(
     Column("attempt_number", Integer, nullable=False),
     Column("status", String(32), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("submitted_at", DateTime(timezone=True), nullable=True),
+    Column("submission_version", Integer, nullable=False, default=0),
+    Column("revision", Integer, nullable=False, default=0),
     Column("graded_at", DateTime(timezone=True), nullable=True),
     Column("error", Text, nullable=True),
     UniqueConstraint(
@@ -119,6 +130,12 @@ responses = Table(
     Column("answer", Text, nullable=False),
     Column("score", Float, nullable=True),
     Column("feedback", Text, nullable=True),
+    Column("criterion_scores", JSON, nullable=True),
+    Column("original_score", Float, nullable=True),
+    Column("original_feedback", Text, nullable=True),
+    Column("overridden", Boolean, nullable=False, default=False),
+    Column("edited_by", String(128), nullable=True),
+    Column("edited_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("attempt_id", "question_id", name="uq_grading_attempt_response"),
@@ -145,6 +162,39 @@ criteria_met = Table(
     Column("is_met", Boolean, nullable=False),
 )
 
+grading_jobs = Table(
+    "grading_jobs",
+    grading_metadata,
+    Column("id", String(36), primary_key=True),
+    Column("attempt_id", ForeignKey("grading_attempts.id"), nullable=False, index=True),
+    Column("submission_version", Integer, nullable=False),
+    Column("status", String(16), nullable=False, index=True),
+    Column("snapshot", JSON, nullable=False),
+    Column("request", JSON, nullable=False),
+    Column("claim_count", Integer, nullable=False, default=0),
+    Column("next_retry_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("lease_token", String(36), nullable=True),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("attempt_id", "submission_version", name="uq_grading_job_version"),
+)
+
+grade_changes = Table(
+    "grading_grade_changes",
+    grading_metadata,
+    Column("id", String(36), primary_key=True),
+    Column("response_id", ForeignKey("grading_responses.id"), nullable=False, index=True),
+    Column("editor_id", String(128), nullable=False),
+    Column("edited_at", DateTime(timezone=True), nullable=False),
+    Column("old_score", Float, nullable=False),
+    Column("new_score", Float, nullable=False),
+    Column("old_feedback", Text, nullable=True),
+    Column("new_feedback", Text, nullable=False),
+    Column("old_criterion_scores", JSON, nullable=True),
+    Column("new_criterion_scores", JSON, nullable=True),
+)
+
 
 class GradingStoreError(RuntimeError):
     pass
@@ -158,12 +208,22 @@ class GradingConflictError(ValueError):
     pass
 
 
-class AttemptLimitExceededError(ValueError):
+class AttemptLimitExceededError(GradingConflictError):
     pass
 
 
 class AttemptStateError(ValueError):
     pass
+
+def ensure_open(row) -> None:
+    now = datetime.now(UTC)
+    if row["ended_at"] is not None or (
+        row["ends_at"] is not None and utc_datetime(row["ends_at"]) <= now
+    ):
+        raise GradingConflictError("This test is closed. Results remain available.")
+    starts_at = row["starts_at"]
+    if starts_at is not None and now < utc_datetime(starts_at):
+        raise GradingConflictError("This test has not opened yet.")
 
 
 class PostgresGradingRepository:
@@ -179,6 +239,46 @@ class PostgresGradingRepository:
 
     def initialize(self) -> None:
         grading_metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            column_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if self.engine.dialect.name == "postgresql"
+                else "DATETIME"
+            )
+            migrations = {
+                "grading_tests": (
+                    ("starts_at", f"{column_type} NULL"),
+                    ("ends_at", f"{column_type} NULL"),
+                    ("ended_at", f"{column_type} NULL"),
+                    ("ended_by", "VARCHAR(128) NULL"),
+                ),
+                "grading_attempts": (
+                    ("submitted_at", f"{column_type} NULL"),
+                    ("submission_version", "INTEGER NOT NULL DEFAULT 0"),
+                    ("revision", "INTEGER NOT NULL DEFAULT 0"),
+                ),
+                "grading_responses": (
+                    ("criterion_scores", "JSON NULL"),
+                    ("original_score", "FLOAT NULL"),
+                    ("original_feedback", "TEXT NULL"),
+                    ("overridden", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                    ("edited_by", "VARCHAR(128) NULL"),
+                    ("edited_at", f"{column_type} NULL"),
+                ),
+            }
+            for table_name, columns in migrations.items():
+                existing_columns = {
+                    column["name"]
+                    for column in inspect(connection).get_columns(table_name)
+                }
+                for column_name, definition in columns:
+                    if column_name not in existing_columns:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE {table_name} ADD COLUMN "
+                                f"{column_name} {definition}"
+                            )
+                        )
 
     def close(self) -> None:
         self.engine.dispose()
@@ -255,6 +355,8 @@ class PostgresGradingRepository:
                         course_id=course_id,
                         test_name=request.test_name,
                         max_attempts=request.max_attempts,
+                        starts_at=request.starts_at,
+                        ends_at=request.ends_at,
                         created_at=now,
                     )
                 )
@@ -299,6 +401,68 @@ class PostgresGradingRepository:
             raise GradingConflictError("Test identifiers already exist.") from exc
         return self.get_test(test_id)
 
+    def delete_test(self, test_id: str) -> None:
+        with self.engine.begin() as connection:
+            question_ids = connection.execute(
+                select(questions.c.id).where(questions.c.test_id == test_id)
+            ).scalars().all()
+            rubric_ids = connection.execute(
+                select(questions.c.rubric_id).where(
+                    questions.c.test_id == test_id,
+                    questions.c.rubric_id.is_not(None),
+                )
+            ).scalars().all()
+            attempt_ids = connection.execute(
+                select(attempts.c.id).where(attempts.c.test_id == test_id)
+            ).scalars().all()
+            response_ids = (
+                connection.execute(
+                    select(responses.c.id).where(
+                        responses.c.attempt_id.in_(attempt_ids)
+                    )
+                ).scalars().all()
+                if attempt_ids
+                else []
+            )
+            if response_ids:
+                connection.execute(
+                    delete(grade_changes).where(
+                        grade_changes.c.response_id.in_(response_ids)
+                    )
+                )
+                connection.execute(
+                    delete(criteria_met).where(
+                        criteria_met.c.response_id.in_(response_ids)
+                    )
+                )
+                connection.execute(
+                    delete(responses).where(responses.c.id.in_(response_ids))
+                )
+            if attempt_ids:
+                connection.execute(
+                    delete(grading_jobs).where(
+                        grading_jobs.c.attempt_id.in_(attempt_ids)
+                    )
+                )
+                connection.execute(
+                    delete(attempts).where(attempts.c.id.in_(attempt_ids))
+                )
+            if question_ids:
+                connection.execute(
+                    delete(examples).where(examples.c.question_id.in_(question_ids))
+                )
+                connection.execute(
+                    delete(questions).where(questions.c.id.in_(question_ids))
+                )
+            if rubric_ids:
+                connection.execute(
+                    delete(criteria).where(criteria.c.rubric_id.in_(rubric_ids))
+                )
+                connection.execute(
+                    delete(rubrics).where(rubrics.c.id.in_(rubric_ids))
+                )
+            connection.execute(delete(tests).where(tests.c.id == test_id))
+
     def set_question_rubric(
         self, test_id: str, question_id: str, request: RubricCreate
     ) -> Question:
@@ -316,7 +480,6 @@ class PostgresGradingRepository:
                 )
                 if question_row is None:
                     raise GradingRecordNotFoundError(question_id)
-                old_rubric_id = question_row["rubric_id"]
                 connection.execute(insert(rubrics).values(id=new_rubric_id))
                 connection.execute(
                     insert(criteria),
@@ -338,11 +501,7 @@ class PostgresGradingRepository:
                     .where(questions.c.id == question_id)
                     .values(**update_values)
                 )
-                if old_rubric_id is not None:
-                    connection.execute(
-                        delete(criteria).where(criteria.c.rubric_id == old_rubric_id)
-                    )
-                    connection.execute(delete(rubrics).where(rubrics.c.id == old_rubric_id))
+                # Historical jobs and criterion results still reference old rubrics.
         except IntegrityError as exc:
             raise GradingConflictError("Rubric identifiers already exist.") from exc
         return self._get_question(question_id)
@@ -471,6 +630,7 @@ class PostgresGradingRepository:
                 )
                 if test_row is None:
                     raise GradingRecordNotFoundError(test_id)
+                ensure_open(test_row)
                 used = connection.execute(
                     select(func.count())
                     .select_from(attempts)
@@ -499,6 +659,161 @@ class PostgresGradingRepository:
         except IntegrityError as exc:
             raise GradingConflictError("Concurrent attempt creation conflicted.") from exc
         return self.get_attempt(attempt_id)
+
+    def create_completed_attempt(
+        self,
+        *,
+        test_id: str,
+        user_id: str,
+        responses_by_external_id: dict[str, tuple[str, float, str, set[int]]],
+    ) -> Attempt:
+        """Create an idempotent, already-graded attempt for local demo data."""
+        now = datetime.now(UTC)
+        attempt_id = str(uuid.uuid4())
+        # Accepted snapshot for the mock grading job, mirroring accept_submission.
+        test_snapshot = self.get_test(test_id).model_dump(mode="json")
+        existing_id: str | None = None
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(attempts.c.id).where(
+                    attempts.c.test_id == test_id,
+                    attempts.c.user_id == user_id,
+                    attempts.c.attempt_number == 1,
+                )
+            ).scalar_one_or_none()
+            existing_id = existing
+            question_rows = connection.execute(
+                select(questions)
+                .where(questions.c.test_id == test_id)
+                .order_by(questions.c.position)
+            ).mappings().all()
+            if not question_rows:
+                raise GradingRecordNotFoundError(test_id)
+            if existing is None:
+                connection.execute(
+                    insert(attempts).values(
+                        id=attempt_id,
+                        test_id=test_id,
+                        user_id=user_id,
+                        attempt_number=1,
+                        status="graded",
+                        started_at=now - timedelta(minutes=10),
+                        submitted_at=now - timedelta(minutes=5),
+                        submission_version=1,
+                        revision=1,
+                        graded_at=now,
+                    )
+                )
+            payload_responses: list[dict] = []
+            for question in question_rows:
+                    external_id = question["external_id"]
+                    answer, score, feedback, met_indexes = responses_by_external_id[
+                        external_id
+                    ]
+                    payload_responses.append(
+                        {"question_id": question["id"], "answer": answer}
+                    )
+                    score = min(score, question["max_score"])
+                    response_row = connection.execute(
+                        select(responses).where(
+                            responses.c.attempt_id == (existing or attempt_id),
+                            responses.c.question_id == question["id"],
+                        )
+                    ).mappings().first()
+                    response_id = response_row["id"] if response_row else str(uuid.uuid4())
+                    criterion_ids = (
+                        connection.execute(
+                            select(criteria.c.id)
+                            .where(criteria.c.rubric_id == question["rubric_id"])
+                            .order_by(criteria.c.id)
+                        ).scalars().all()
+                        if question["rubric_id"] is not None
+                        else []
+                    )
+                    criterion_scores = [
+                        {
+                            "criteria_id": criterion_id,
+                            "score": (
+                                1 if index in met_indexes else 0
+                            ),
+                        }
+                        for index, criterion_id in enumerate(criterion_ids)
+                    ]
+                    response_values = {
+                        "answer": answer,
+                        "score": score,
+                        "feedback": feedback,
+                        "criterion_scores": criterion_scores,
+                        "original_score": score,
+                        "original_feedback": feedback,
+                        "overridden": False,
+                        "edited_by": None,
+                        "edited_at": None,
+                        "updated_at": now,
+                    }
+                    if response_row is None:
+                        connection.execute(
+                            insert(responses).values(
+                                id=response_id,
+                                attempt_id=existing or attempt_id,
+                                question_id=question["id"],
+                                created_at=now - timedelta(minutes=5),
+                                **response_values,
+                            )
+                        )
+                    else:
+                        connection.execute(
+                            update(responses)
+                            .where(responses.c.id == response_id)
+                            .values(**response_values)
+                        )
+                    connection.execute(
+                        delete(criteria_met).where(criteria_met.c.response_id == response_id)
+                    )
+                    if criterion_ids:
+                            connection.execute(
+                                insert(criteria_met),
+                                [
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "response_id": response_id,
+                                    "criteria_id": criterion_id,
+                                    "is_met": index in met_indexes,
+                                }
+                                for index, criterion_id in enumerate(criterion_ids)
+                            ],
+                        )
+            seeded_attempt_id = existing_id or attempt_id
+            job_exists = connection.execute(
+                select(grading_jobs.c.id).where(
+                    grading_jobs.c.attempt_id == seeded_attempt_id,
+                    grading_jobs.c.submission_version == 1,
+                )
+            ).scalar_one_or_none()
+            if job_exists is None:
+                connection.execute(
+                    insert(grading_jobs).values(
+                        id=str(uuid.uuid4()),
+                        attempt_id=seeded_attempt_id,
+                        submission_version=1,
+                        status="succeeded",
+                        snapshot=test_snapshot,
+                        request={
+                            "responses": sorted(
+                                payload_responses,
+                                key=lambda item: item["question_id"],
+                            ),
+                            "finalize": True,
+                        },
+                        claim_count=1,
+                        next_retry_at=now,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        last_error=None,
+                        created_at=now - timedelta(minutes=5),
+                    )
+                )
+        return self.get_attempt(existing_id or attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Attempt:
         try:
@@ -529,81 +844,11 @@ class PostgresGradingRepository:
             rows = connection.execute(statement).mappings().all()
         return [Attempt.model_validate(dict(row)) for row in rows]
 
-    def save_response(self, attempt_id: str, question_id: str, answer: str) -> str:
-        now = datetime.now(UTC)
-        with self.engine.begin() as connection:
-            row = connection.execute(
-                select(responses.c.id).where(
-                    responses.c.attempt_id == attempt_id,
-                    responses.c.question_id == question_id,
-                )
-            ).first()
-            if row is None:
-                response_id = str(uuid.uuid4())
-                connection.execute(
-                    insert(responses).values(
-                        id=response_id,
-                        attempt_id=attempt_id,
-                        question_id=question_id,
-                        answer=answer,
-                        score=None,
-                        feedback=None,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                )
-            else:
-                response_id = str(row[0])
-                connection.execute(
-                    update(responses)
-                    .where(responses.c.id == response_id)
-                    .values(answer=answer, updated_at=now)
-                )
-        return response_id
-
-    def save_response_grade(
-        self,
-        *,
-        response_id: str,
-        score: float,
-        feedback: str,
-        criteria_met_results: list[dict],
-    ) -> None:
-        now = datetime.now(UTC)
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(responses)
-                .where(responses.c.id == response_id)
-                .values(score=score, feedback=feedback, updated_at=now)
-            )
-            if result.rowcount == 0:
-                raise GradingRecordNotFoundError(response_id)
-            connection.execute(
-                delete(criteria_met).where(criteria_met.c.response_id == response_id)
-            )
-            if criteria_met_results:
-                # An empty list here would make SQLAlchemy execute a single
-                # INSERT ... DEFAULT VALUES (it can't infer columns from zero
-                # dicts) instead of a no-op, so this must stay guarded —
-                # few-shot-graded responses always pass an empty list.
-                connection.execute(
-                    insert(criteria_met),
-                    [
-                        {
-                            "id": str(uuid.uuid4()),
-                            "response_id": response_id,
-                            "criteria_id": item["criteria_id"],
-                            "is_met": item["is_met"],
-                        }
-                        for item in criteria_met_results
-                    ],
-                )
-
     def list_responses(self, attempt_id: str) -> list[Response]:
         statement = (
             select(responses, questions.c.position)
             .join(questions, questions.c.id == responses.c.question_id)
-            .where(responses.c.attempt_id == attempt_id, responses.c.score.isnot(None))
+            .where(responses.c.attempt_id == attempt_id)
             .order_by(questions.c.position)
         )
         with self.engine.connect() as connection:
@@ -625,50 +870,6 @@ class PostgresGradingRepository:
             self._to_response(row, grouped.get(row["id"], []))
             for row in response_rows
         ]
-
-    def mark_attempt_graded(self, attempt_id: str) -> Attempt:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(
-                    status="graded",
-                    graded_at=datetime.now(UTC),
-                    error=None,
-                )
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-        return self.get_attempt(attempt_id)
-
-    def mark_attempt_grading(self, attempt_id: str) -> Attempt:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="grading", error=None)
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-        return self.get_attempt(attempt_id)
-
-    def mark_attempt_in_progress(self, attempt_id: str) -> None:
-        with self.engine.begin() as connection:
-            result = connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="in_progress", error=None)
-            )
-        if result.rowcount == 0:
-            raise GradingRecordNotFoundError(attempt_id)
-
-    def mark_attempt_failed(self, attempt_id: str, error: str) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
-                update(attempts)
-                .where(attempts.c.id == attempt_id)
-                .values(status="failed", error=error[:2000])
-            )
 
     @staticmethod
     def _course_exists(connection: Connection, course_id: str) -> bool:

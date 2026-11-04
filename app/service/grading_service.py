@@ -2,21 +2,35 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from contextlib import suppress
+from datetime import datetime
 from typing import Literal
 
 from app.config import Settings
-from app.db import AttemptStateError, PostgresGradingRepository
+from app.db import (
+    AttemptStateError,
+    GradingRecordNotFoundError,
+    PostgresGradingRepository,
+)
+from app.db.grading_workflow import GradingWorkflowRepository, LeaseLostError
 from app.dto import (
     AttemptGradeResponse,
     CourseCreate,
     FewShotGradingResult,
     GradeAttemptRequest,
     RubricCreate,
+    StudentSubmissionSummary,
+    SubmissionGradeUpdate,
     TestCreate,
 )
 from app.model import Attempt, Course, Question, Response, Test
-from app.service.csv_import import parse_criteria_csv, parse_examples_csv, parse_questions_csv
-from app.service.llm_client import LocalLLMClient
+from app.service.csv_import import (
+    parse_criteria_csv,
+    parse_examples_csv,
+    parse_questions_csv,
+)
+from app.service.llm_client import LLMResponseError, LLMServiceError, LocalLLMClient
 
 SYSTEM_PROMPT_RUBRIC = """You are a strict grading assistant.
 Evaluate whether the student answer fulfills each grading criterion independently.
@@ -37,10 +51,6 @@ logger = logging.getLogger(__name__)
 
 
 class StudentAnswerTooLargeError(ValueError):
-    pass
-
-
-class IncompleteAttemptError(ValueError):
     pass
 
 
@@ -89,16 +99,22 @@ class GradingService:
             temperature=settings.llm_temperature,
             max_tokens=settings.llm_max_tokens,
         )
-        self._grading_tasks: dict[str, asyncio.Task[None]] = {}
+        self.workflow = GradingWorkflowRepository(self.grading_store)
+        self._worker_task: asyncio.Task | None = None
+        self._wake = asyncio.Event()
 
     async def initialize(self) -> None:
+        self._wake = asyncio.Event()
         await asyncio.to_thread(self.grading_store.initialize)
+        self._worker_task = asyncio.create_task(
+            self._worker_loop(), name="grading-worker"
+        )
 
     async def close(self) -> None:
-        if self._grading_tasks:
-            await asyncio.gather(
-                *list(self._grading_tasks.values()), return_exceptions=True
-            )
+        if self._worker_task is not None:
+            self._worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._worker_task
         await asyncio.gather(
             asyncio.to_thread(self.grading_store.close),
             self.llm.close(),
@@ -138,10 +154,14 @@ class GradingService:
         test_name: str,
         max_attempts: int,
         csv_content: str,
+        ends_at: datetime,
+        starts_at: datetime | None = None,
     ) -> Test:
         questions = parse_questions_csv(csv_content)
         request = TestCreate(
             test_name=test_name,
+            starts_at=starts_at,
+            ends_at=ends_at,
             max_attempts=max_attempts,
             questions=questions,
         )
@@ -274,138 +294,268 @@ class GradingService:
         user_id: str,
         request: GradeAttemptRequest,
     ) -> Attempt:
-        """Saves the submitted answers and starts grading them in the
-        background. Returns immediately with the attempt in "grading" status
-        — poll get_attempt_result for the outcome instead of waiting here,
-        since each answer requires its own LLM round-trip.
-        """
         attempt = await asyncio.to_thread(self.grading_store.get_attempt, attempt_id)
         self._validate_attempt(attempt, test_id, user_id)
-        existing_task = self._grading_tasks.get(attempt_id)
-        if existing_task is not None and not existing_task.done():
-            raise AttemptStateError("This attempt is already being graded.")
         test = await self.get_test(test_id)
         questions_by_id = {question.id: question for question in test.questions}
-
-        to_grade: list[tuple[str, Question, str]] = []
-        for submission in request.responses:
-            question = questions_by_id.get(submission.question_id)
-            if question is None:
+        normalized = request.model_copy(deep=True)
+        for submission in normalized.responses:
+            if submission.question_id not in questions_by_id:
                 raise UnknownQuestionError(
                     f"Question '{submission.question_id}' does not belong to test '{test_id}'."
                 )
-            answer = submission.answer.strip()
-            if len(answer) > self.settings.max_answer_characters:
-                raise StudentAnswerTooLargeError(
-                    f"Answer for question '{question.id}' exceeds the character limit."
-                )
-            response_id = await asyncio.to_thread(
-                self.grading_store.save_response,
-                attempt_id,
-                question.id,
-                answer,
-            )
-            to_grade.append((response_id, question, answer))
+            submission.answer = submission.answer.strip()
+            if len(submission.answer) > self.settings.max_answer_characters:
+                raise StudentAnswerTooLargeError("Answer exceeds the character limit.")
+        accepted = await asyncio.to_thread(
+            self.workflow.accept_submission,
+            test,
+            attempt_id,
+            user_id,
+            normalized,
+        )
+        self._wake.set()
+        return accepted
 
+    async def retry_grading(
+        self, test_id: str, attempt_id: str, user_id: str
+    ) -> Attempt:
         attempt = await asyncio.to_thread(
-            self.grading_store.mark_attempt_grading, attempt_id
+            self.workflow.retry_grading, test_id, attempt_id, user_id
         )
-        task = asyncio.create_task(
-            self._grade_in_background(
-                test, attempt_id, to_grade, finalize=request.finalize
-            ),
-            name=f"grade-attempt-{attempt_id}",
-        )
-        self._grading_tasks[attempt_id] = task
-        task.add_done_callback(
-            lambda done_task, aid=attempt_id: self._forget_grading_task(aid, done_task)
-        )
+        self._wake.set()
         return attempt
 
-    async def _grade_in_background(
-        self,
-        test: Test,
-        attempt_id: str,
-        to_grade: list[tuple[str, Question, str]],
-        *,
-        finalize: bool,
-    ) -> None:
-        # Grades every submitted answer even if one fails, so a single flaky
-        # LLM call doesn't discard grades already earned on other questions
-        # in the same submission.
-        had_failure = False
-        for response_id, question, answer in to_grade:
+    async def _worker_loop(self) -> None:
+        while True:
+            self._wake.clear()
+            try:
+                if await self.process_pending_job():
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Grading worker could not process pending work")
+            try:
+                await asyncio.wait_for(
+                    self._wake.wait(), timeout=self.settings.grading_poll_seconds
+                )
+            except TimeoutError:
+                pass
+
+    async def process_pending_job(self) -> bool:
+        """Process a persisted job, also used by deterministic worker tests."""
+        job = await asyncio.to_thread(
+            self.workflow.claim_job,
+            self.settings.grading_lease_seconds,
+            self.settings.grading_max_retries,
+        )
+        if job is None:
+            return False
+        heartbeat = asyncio.create_task(self._renew_job_lease(job))
+        try:
+            if job["exhausted"]:
+                await asyncio.to_thread(
+                    self.workflow.finish_job,
+                    job,
+                    error="Grading recovery retry limit reached.",
+                )
+            else:
+                await self._process_job(job)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self.workflow.release_job, job)
+            raise
+        except LeaseLostError:
+            logger.info("Grading lease lost for job %s", job["id"])
+        except Exception as exc:
+            logger.exception("Unexpected grading job error")
+            with suppress(LeaseLostError):
+                await asyncio.to_thread(
+                    self.workflow.finish_job,
+                    job,
+                    error=f"Grading interrupted: {type(exc).__name__}",
+                    retry=job["claim_count"] <= self.settings.grading_max_retries,
+                    delay=self.settings.grading_retry_seconds
+                    * 2 ** (job["claim_count"] - 1),
+                )
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+        return True
+
+    async def _renew_job_lease(self, job: dict) -> None:
+        while True:
+            await asyncio.sleep(self.settings.grading_lease_seconds / 3)
+            try:
+                owned = await asyncio.to_thread(
+                    self.workflow.renew_lease,
+                    job["id"],
+                    job["lease_token"],
+                    self.settings.grading_lease_seconds,
+                )
+                if not owned:
+                    return
+            except Exception:
+                logger.exception("Could not renew grading lease")
+                return
+
+    async def _process_job(self, job: dict) -> None:
+        test = Test.model_validate(job["snapshot"])
+        questions_by_id = {question.id: question for question in test.questions}
+        saved = await asyncio.to_thread(
+            self.grading_store.list_responses, job["attempt_id"]
+        )
+        requested_ids = {item["question_id"] for item in job["request"]["responses"]}
+        errors: list[str] = []
+        permanent_failure = False
+        for response in saved:
+            if (
+                response.score is not None
+                or response.overridden
+                or response.question_id not in requested_ids
+            ):
+                continue
+            question = questions_by_id[response.question_id]
             try:
                 method = self._resolve_grading_method(question)
                 if method == "rubric":
                     result = await self.llm.grade(
                         system_prompt=SYSTEM_PROMPT_RUBRIC,
-                        user_prompt=self._grading_prompt(question, answer),
+                        user_prompt=self._grading_prompt(question, response.answer),
                     )
-                    self._validate_score_scale(result.score, question)
-                    known_criteria_ids = {item.id for item in question.rubric.criteria}
-                    returned_criteria_ids = {item.criteria_id for item in result.criteria_met}
-                    unknown = returned_criteria_ids - known_criteria_ids
+                    known_ids = {item.id for item in question.rubric.criteria}
+                    unknown = {
+                        item.criteria_id for item in result.criteria_met
+                    } - known_ids
                     if unknown:
                         raise LLMCriteriaMismatchError(
                             f"LLM returned unknown criteria id(s): {sorted(unknown)}."
                         )
-                    criteria_met_results = [
-                        {"criteria_id": item.criteria_id, "is_met": item.is_met}
-                        for item in result.criteria_met
+                    criteria_results = [
+                        item.model_dump() for item in result.criteria_met
                     ]
                 else:
                     result = await self.llm.grade_fewshot(
                         system_prompt=SYSTEM_PROMPT_FEWSHOT,
-                        user_prompt=self._fewshot_prompt(question, answer),
+                        user_prompt=self._fewshot_prompt(question, response.answer),
                     )
-                    self._validate_score_scale(result.score, question)
-                    criteria_met_results = []
+                    criteria_results = []
+                self._validate_score_scale(result.score, question)
                 await asyncio.to_thread(
-                    self.grading_store.save_response_grade,
-                    response_id=response_id,
-                    score=result.score,
-                    feedback=result.feedback,
-                    criteria_met_results=criteria_met_results,
+                    self.workflow.save_job_grade,
+                    job,
+                    response.id,
+                    result.score,
+                    result.feedback,
+                    criteria_results,
                 )
-            except Exception as exc:  # noqa: BLE001 - LLM/validation failures must not crash the task
-                had_failure = True
-                logger.error(
-                    "Grading failed for question %s on attempt %s: %s",
-                    question.id,
-                    attempt_id,
-                    exc,
-                )
-                await asyncio.to_thread(
-                    self.grading_store.mark_attempt_failed,
-                    attempt_id,
-                    f"Question '{question.id}': {type(exc).__name__}: {exc}",
-                )
-
-        if had_failure:
-            return
-        if not finalize:
+            except LeaseLostError:
+                raise
+            except Exception as exc:
+                logger.exception("Question %s failed to grade", question.id)
+                errors.append(f"Question '{question.id}': {type(exc).__name__}: {exc}")
+                if not isinstance(exc, LLMServiceError) or isinstance(
+                    exc, LLMResponseError
+                ):
+                    permanent_failure = True
+        if errors:
+            retry = (
+                not permanent_failure
+                and job["claim_count"] <= self.settings.grading_max_retries
+            )
             await asyncio.to_thread(
-                self.grading_store.mark_attempt_in_progress, attempt_id
+                self.workflow.finish_job,
+                job,
+                error="; ".join(errors)[:2000],
+                retry=retry,
+                delay=self.settings.grading_retry_seconds
+                * 2 ** (job["claim_count"] - 1),
             )
             return
-        responses = await asyncio.to_thread(self.grading_store.list_responses, attempt_id)
-        graded_ids = {response.question_id for response in responses}
-        missing = [
-            question.id for question in test.questions if question.id not in graded_ids
-        ]
-        if missing:
-            await asyncio.to_thread(
-                self.grading_store.mark_attempt_failed,
-                attempt_id,
-                f"Cannot finalize attempt; ungraded question(s): {missing}.",
-            )
-            return
-        await asyncio.to_thread(self.grading_store.mark_attempt_graded, attempt_id)
+        saved = await asyncio.to_thread(
+            self.grading_store.list_responses, job["attempt_id"]
+        )
+        completed = {item.question_id for item in saved if item.score is not None}
+        missing = set(questions_by_id) - completed
+        error = (
+            f"Cannot finalize attempt; ungraded question(s): {sorted(missing)}."
+            if missing and job["request"]["finalize"]
+            else None
+        )
+        await asyncio.to_thread(self.workflow.finish_job, job, error=error)
 
-    def _forget_grading_task(self, attempt_id: str, task: asyncio.Task[None]) -> None:
-        if self._grading_tasks.get(attempt_id) is task:
-            self._grading_tasks.pop(attempt_id, None)
+    async def set_deadline(self, test_id: str, ends_at: datetime) -> Test:
+        return await asyncio.to_thread(self.workflow.set_deadline, test_id, ends_at)
+
+    async def end_test(self, test_id: str, instructor_id: str) -> Test:
+        return await asyncio.to_thread(self.workflow.end_test, test_id, instructor_id)
+
+    async def get_submission(
+        self, test_id: str, attempt_id: str
+    ) -> AttemptGradeResponse:
+        attempt = await asyncio.to_thread(self.grading_store.get_attempt, attempt_id)
+        if attempt.test_id != test_id or attempt.submitted_at is None:
+            raise GradingRecordNotFoundError(attempt_id)
+        result = await self.get_attempt_result(test_id, attempt_id, attempt.user_id)
+        submissions = await asyncio.to_thread(self.workflow.submitted_attempts, test_id)
+        latest = next(
+            (
+                item
+                for item in submissions
+                if item.user_id == attempt.user_id and item.status == "graded"
+            ),
+            None,
+        )
+        result.can_edit = latest is not None and latest.id == attempt_id
+        return result
+
+    async def edit_submission(
+        self,
+        test_id: str,
+        attempt_id: str,
+        editor_id: str,
+        request: SubmissionGradeUpdate,
+    ) -> AttemptGradeResponse:
+        await asyncio.to_thread(
+            self.workflow.edit_grades, test_id, attempt_id, editor_id, request
+        )
+        return await self.get_submission(test_id, attempt_id)
+
+    async def list_submissions(
+        self, test_id: str, students
+    ) -> list[StudentSubmissionSummary]:
+        test = await self.get_test(test_id)
+        submissions = await asyncio.to_thread(self.workflow.submitted_attempts, test_id)
+        latest, latest_graded = {}, {}
+        for attempt in submissions:
+            latest.setdefault(attempt.user_id, attempt)
+            if attempt.status == "graded":
+                latest_graded.setdefault(attempt.user_id, attempt)
+        summaries = []
+        for student in students:
+            attempt = latest.get(student.id)
+            result = (
+                await self.get_attempt_result(test_id, attempt.id, student.id)
+                if attempt
+                else None
+            )
+            summaries.append(
+                StudentSubmissionSummary(
+                    user_id=student.id,
+                    full_name=student.full_name,
+                    student_number=student.student_number,
+                    latest_submission=attempt,
+                    latest_graded_submission=latest_graded.get(student.id),
+                    total_score=result.total_score
+                    if attempt and attempt.status == "graded"
+                    else None,
+                    max_score=result.max_score
+                    if result
+                    else sum(q.max_score for q in test.questions),
+                )
+            )
+        return summaries
 
     async def get_attempt_result(
         self,
@@ -414,9 +564,13 @@ class GradingService:
         user_id: str,
     ) -> AttemptGradeResponse:
         attempt = await asyncio.to_thread(self.grading_store.get_attempt, attempt_id)
-        self._validate_attempt(attempt, test_id, user_id, allow_graded=True)
-        test = await self.get_test(test_id)
-        responses = await asyncio.to_thread(self.grading_store.list_responses, attempt_id)
+        self._validate_attempt(attempt, test_id, user_id)
+        test = await asyncio.to_thread(
+            self.workflow.snapshot_for_attempt, attempt_id
+        ) or await self.get_test(test_id)
+        responses = await asyncio.to_thread(
+            self.grading_store.list_responses, attempt_id
+        )
         return self._attempt_response(test, attempt, responses)
 
     async def list_attempts(self, test_id: str, user_id: str) -> list[Attempt]:
@@ -436,7 +590,9 @@ class GradingService:
         the student-facing attempt flow.
         """
         test = await self.get_test(test_id)
-        question = next((item for item in test.questions if item.id == question_id), None)
+        question = next(
+            (item for item in test.questions if item.id == question_id), None
+        )
         if question is None:
             raise UnknownQuestionError(
                 f"Question '{question_id}' does not belong to test '{test_id}'."
@@ -459,7 +615,7 @@ class GradingService:
 
     @staticmethod
     def _validate_score_scale(score: float, question: Question) -> None:
-        if score > question.max_score:
+        if not math.isfinite(score) or score < 0 or score > question.max_score:
             raise LLMScoreScaleError(
                 f"LLM returned score {score}; "
                 f"question '{question.id}' allows at most {question.max_score}."
@@ -470,13 +626,9 @@ class GradingService:
         attempt: Attempt,
         test_id: str,
         user_id: str,
-        *,
-        allow_graded: bool = False,
     ) -> None:
         if attempt.test_id != test_id or attempt.user_id != user_id:
             raise AttemptStateError("Attempt does not belong to this user and test.")
-        if attempt.status == "graded" and not allow_graded:
-            raise AttemptStateError("A finalized attempt cannot be changed.")
 
     @staticmethod
     def _grading_prompt(question: Question, answer: str) -> str:
@@ -501,7 +653,9 @@ Evaluate every criterion and use max_score={question.max_score}. Return JSON onl
     @staticmethod
     def _fewshot_prompt(question: Question, answer: str) -> str:
         band_order = {"excellent": 0, "average": 1, "poor": 2}
-        ordered_examples = sorted(question.examples, key=lambda item: band_order[item.band])
+        ordered_examples = sorted(
+            question.examples, key=lambda item: band_order[item.band]
+        )
         examples_block = "\n\n".join(
             f'<example band="{item.band}" score="{item.score}">\n{item.example_answer}\n</example>'
             for item in ordered_examples
@@ -526,7 +680,9 @@ Score the student answer out of max_score={question.max_score}. Return JSON only
         attempt: Attempt,
         responses: list[Response],
     ) -> AttemptGradeResponse:
-        total_score = sum(response.score for response in responses)
+        total_score = sum(
+            response.score for response in responses if response.score is not None
+        )
         max_score = sum(question.max_score for question in test.questions)
         return AttemptGradeResponse(
             attempt=attempt,
@@ -534,6 +690,9 @@ Score the student answer out of max_score={question.max_score}. Return JSON only
             total_score=total_score,
             max_score=max_score,
             percentage=round(total_score / max_score * 100, 2),
-            completed_questions=len(responses),
+            completed_questions=sum(
+                response.score is not None for response in responses
+            ),
+            questions=test.questions,
             total_questions=len(test.questions),
         )

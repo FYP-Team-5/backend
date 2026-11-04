@@ -101,3 +101,33 @@ def test_duplicate_and_validation_errors(client: TestClient) -> None:
 
     weak = {**STUDENT, "email": "invalid", "password": "short"}
     assert client.post("/api/v1/auth/register/student", json=weak).status_code == 422
+
+
+def test_instructor_role_filter_matches_the_stored_user_role(
+    client, instructor_headers
+):
+    response = client.get("/api/v1/users?role=instructor", headers=instructor_headers)
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    assert response.json()[0]["role"] == "instructor"
+
+
+def test_only_instructors_can_create_courses(client, instructor_headers):
+    payload = {"course_code": "CS", "course_name": "Computer Science"}
+    assert client.post("/api/v1/courses", json=payload).status_code == 401
+    client.post("/api/v1/auth/register/student", json=STUDENT)
+    token = _login(client, STUDENT["email"], STUDENT["password"])
+    assert (
+        client.post(
+            "/api/v1/courses",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/v1/courses", json=payload, headers=instructor_headers
+        ).status_code
+        == 201
+    )

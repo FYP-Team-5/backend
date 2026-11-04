@@ -1,8 +1,16 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, UploadFile
+from pydantic import AwareDatetime, ValidationError
 
-from app.controller.dependencies import ID_PATTERN, get_catalog_service, require_api_key
+from app.controller.dependencies import (
+    ID_PATTERN,
+    current_user,
+    get_catalog_service,
+    require_api_key,
+    require_instructor,
+)
+from app.controller.presenters import test_view
 from app.db import (
     GradingConflictError,
     GradingRecordNotFoundError,
@@ -11,6 +19,7 @@ from app.db import (
 from app.dto import (
     CourseCreate,
     TestCreate,
+    UserResponse,
 )
 from app.model import Course, Test
 from app.service import (
@@ -20,7 +29,7 @@ from app.service import (
 
 courses_router = APIRouter(prefix="/courses", tags=["catalog"], dependencies=[Depends(require_api_key)])
 
-@courses_router.post("", response_model=Course, status_code=201)
+@courses_router.post("", response_model=Course, status_code=201, dependencies=[Depends(require_instructor)])
 async def create_course(
     body: CourseCreate,
     service: Annotated[CatalogService, Depends(get_catalog_service)],
@@ -44,6 +53,7 @@ async def list_courses(
     "/{course_id}/tests",
     response_model=Test,
     status_code=201,
+    dependencies=[Depends(require_instructor)],
 )
 async def create_test(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
@@ -64,12 +74,15 @@ async def create_test(
     "/{course_id}/tests/csv",
     response_model=Test,
     status_code=201,
+    dependencies=[Depends(require_instructor)],
 )
 async def create_test_from_csv(
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     service: Annotated[CatalogService, Depends(get_catalog_service)],
     file: Annotated[UploadFile, File()],
     test_name: Annotated[str, Form(min_length=1, max_length=300)],
+    ends_at: Annotated[AwareDatetime, Form()],
+    starts_at: Annotated[AwareDatetime | None, Form()] = None,
     max_attempts: Annotated[int, Form(ge=1, le=100)] = 1,
 ) -> Test:
     try:
@@ -77,7 +90,11 @@ async def create_test_from_csv(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=422, detail="CSV file must be UTF-8 encoded.") from exc
     try:
-        return await service.create_test_from_csv(course_id, test_name, max_attempts, content)
+        return await service.create_test_from_csv(
+            course_id, test_name, max_attempts, content, ends_at, starts_at
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CsvFormatError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GradingRecordNotFoundError as exc:
@@ -93,10 +110,11 @@ async def create_test_from_csv(
     response_model=list[Test],
 )
 async def list_tests(
+    principal: Annotated[UserResponse, Depends(current_user)],
     course_id: Annotated[str, Path(pattern=ID_PATTERN.pattern)],
     service: Annotated[CatalogService, Depends(get_catalog_service)],
 ) -> list[Test]:
     try:
-        return await service.list_tests(course_id)
+        return [test_view(test, principal.role) for test in await service.list_tests(course_id)]
     except GradingRecordNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Course not found.") from exc
