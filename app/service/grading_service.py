@@ -155,10 +155,12 @@ class GradingService:
         max_attempts: int,
         csv_content: str,
         ends_at: datetime,
+        starts_at: datetime | None = None,
     ) -> Test:
         questions = parse_questions_csv(csv_content)
         request = TestCreate(
             test_name=test_name,
+            starts_at=starts_at,
             ends_at=ends_at,
             max_attempts=max_attempts,
             questions=questions,

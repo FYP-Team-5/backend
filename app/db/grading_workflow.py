@@ -65,9 +65,20 @@ class GradingWorkflowRepository:
     def set_deadline(self, test_id: str, ends_at: datetime) -> Test:
         with self.engine.begin() as connection:
             row = self._test(connection, test_id)
-            ensure_open(row)
+            # Unlike attempting a test, the deadline stays editable while the
+            # test is upcoming; only a finished test (ended early or expired)
+            # is frozen.
+            now = datetime.now(UTC)
+            if row["ended_at"] is not None or (
+                row["ends_at"] is not None and utc_datetime(row["ends_at"]) <= now
+            ):
+                raise GradingConflictError(
+                    "This test is closed. Results remain available."
+                )
             if ends_at <= datetime.now(UTC):
                 raise GradingConflictError("End date must be in the future.")
+            if row["starts_at"] is not None and ends_at <= utc_datetime(row["starts_at"]):
+                raise GradingConflictError("End date must be after the start date.")
             connection.execute(
                 update(tests).where(tests.c.id == test_id).values(ends_at=ends_at)
             )

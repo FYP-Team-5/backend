@@ -52,11 +52,18 @@ class TestCreate(BaseModel):
     __test__ = False  # not a pytest test case; name matches the Test domain entity
 
     test_name: str = Field(min_length=1, max_length=300)
+    starts_at: AwareDatetime | None = None
     ends_at: AwareDatetime
     max_attempts: int = Field(default=1, ge=1, le=100)
     questions: list[QuestionCreate] = Field(min_length=1, max_length=500)
 
     _future = field_validator("ends_at")(future_deadline)
+
+    @model_validator(mode="after")
+    def window_ordered(self) -> "TestCreate":
+        if self.starts_at is not None and self.ends_at <= self.starts_at:
+            raise ValueError("End date must be after the start date.")
+        return self
 
 
 class TestDeadlineUpdate(BaseModel):

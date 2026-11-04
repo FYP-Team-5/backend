@@ -82,6 +82,7 @@ def create_app(
             await DemoDataService(
                 grading_store=grading_service.grading_store,
                 user_repository=identity_service.repository,
+                dataset_service=dataset_service,
             ).seed()
         try:
             yield

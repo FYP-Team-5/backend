@@ -14,6 +14,9 @@ from app.service.csv_import import parse_criteria_csv, parse_questions_csv
 DEMO_COURSE_CODE = "DEMO101"
 DEMO_TEST_NAMES = ("Demo Test 1", "Demo Test 2")
 DEMO_DATA_DIRECTORY = Path(__file__).parents[1] / "demo" / "criteria"
+DEMO_TRAINING_DATASET = (
+    Path(__file__).parents[1] / "demo" / "dataset" / "training_data_moh_eng_rubrics.csv"
+)
 
 
 class DemoDataService:
@@ -24,9 +27,11 @@ class DemoDataService:
         *,
         grading_store: PostgresGradingRepository,
         user_repository: PostgresUserRepository,
+        dataset_service=None,
     ) -> None:
         self.grading_store = grading_store
         self.user_repository = user_repository
+        self.dataset_service = dataset_service
 
     async def seed(self) -> None:
         courses = await asyncio.to_thread(self.grading_store.list_courses)
@@ -65,6 +70,21 @@ class DemoDataService:
                     "rubric",
                 )
             await asyncio.to_thread(self._seed_attempts, test.id)
+        await self._seed_training_dataset()
+
+    async def _seed_training_dataset(self) -> None:
+        """Publish the bundled mock dataset as the first training-dataset version."""
+        if self.dataset_service is None or not DEMO_TRAINING_DATASET.is_file():
+            return
+        if await self.dataset_service.list_versions():
+            return
+        instructor = next(iter(self.user_repository.list(role="instructor")), None)
+        if instructor is None:
+            return
+        with DEMO_TRAINING_DATASET.open("rb") as source:
+            await self.dataset_service.upload(
+                source, instructor.id, DEMO_TRAINING_DATASET.name
+            )
 
     @staticmethod
     def _test_request(test_name: str) -> TestCreate:

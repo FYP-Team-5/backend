@@ -61,6 +61,7 @@ tests = Table(
     Column("test_name", String(300), nullable=False),
     Column("max_attempts", Integer, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("starts_at", DateTime(timezone=True), nullable=True),
     Column("ends_at", DateTime(timezone=True), nullable=True),
     Column("ended_at", DateTime(timezone=True), nullable=True),
     Column("ended_by", String(128), nullable=True),
@@ -215,10 +216,14 @@ class AttemptStateError(ValueError):
     pass
 
 def ensure_open(row) -> None:
+    now = datetime.now(UTC)
     if row["ended_at"] is not None or (
-        row["ends_at"] is not None and utc_datetime(row["ends_at"]) <= datetime.now(UTC)
+        row["ends_at"] is not None and utc_datetime(row["ends_at"]) <= now
     ):
         raise GradingConflictError("This test is closed. Results remain available.")
+    starts_at = row["starts_at"]
+    if starts_at is not None and now < utc_datetime(starts_at):
+        raise GradingConflictError("This test has not opened yet.")
 
 
 class PostgresGradingRepository:
@@ -242,6 +247,7 @@ class PostgresGradingRepository:
             )
             migrations = {
                 "grading_tests": (
+                    ("starts_at", f"{column_type} NULL"),
                     ("ends_at", f"{column_type} NULL"),
                     ("ended_at", f"{column_type} NULL"),
                     ("ended_by", "VARCHAR(128) NULL"),
@@ -349,6 +355,7 @@ class PostgresGradingRepository:
                         course_id=course_id,
                         test_name=request.test_name,
                         max_attempts=request.max_attempts,
+                        starts_at=request.starts_at,
                         ends_at=request.ends_at,
                         created_at=now,
                     )
@@ -663,6 +670,8 @@ class PostgresGradingRepository:
         """Create an idempotent, already-graded attempt for local demo data."""
         now = datetime.now(UTC)
         attempt_id = str(uuid.uuid4())
+        # Accepted snapshot for the mock grading job, mirroring accept_submission.
+        test_snapshot = self.get_test(test_id).model_dump(mode="json")
         existing_id: str | None = None
         with self.engine.begin() as connection:
             existing = connection.execute(
@@ -695,11 +704,15 @@ class PostgresGradingRepository:
                         graded_at=now,
                     )
                 )
+            payload_responses: list[dict] = []
             for question in question_rows:
                     external_id = question["external_id"]
                     answer, score, feedback, met_indexes = responses_by_external_id[
                         external_id
                     ]
+                    payload_responses.append(
+                        {"question_id": question["id"], "answer": answer}
+                    )
                     score = min(score, question["max_score"])
                     response_row = connection.execute(
                         select(responses).where(
@@ -770,6 +783,36 @@ class PostgresGradingRepository:
                                 for index, criterion_id in enumerate(criterion_ids)
                             ],
                         )
+            seeded_attempt_id = existing_id or attempt_id
+            job_exists = connection.execute(
+                select(grading_jobs.c.id).where(
+                    grading_jobs.c.attempt_id == seeded_attempt_id,
+                    grading_jobs.c.submission_version == 1,
+                )
+            ).scalar_one_or_none()
+            if job_exists is None:
+                connection.execute(
+                    insert(grading_jobs).values(
+                        id=str(uuid.uuid4()),
+                        attempt_id=seeded_attempt_id,
+                        submission_version=1,
+                        status="succeeded",
+                        snapshot=test_snapshot,
+                        request={
+                            "responses": sorted(
+                                payload_responses,
+                                key=lambda item: item["question_id"],
+                            ),
+                            "finalize": True,
+                        },
+                        claim_count=1,
+                        next_retry_at=now,
+                        lease_token=None,
+                        lease_expires_at=None,
+                        last_error=None,
+                        created_at=now - timedelta(minutes=5),
+                    )
+                )
         return self.get_attempt(existing_id or attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Attempt:

@@ -7,6 +7,7 @@ happen outside transactions. A ready version and its object key never change.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import uuid
@@ -33,6 +34,7 @@ from app.db.grading_repository import (
     GradingConflictError,
     GradingRecordNotFoundError,
     attempts,
+    courses,
     criteria_met,
     grading_jobs,
     grading_metadata,
@@ -42,7 +44,12 @@ from app.db.grading_repository import (
 from app.db.grading_workflow import LeaseLostError
 from app.model import Test
 from app.model.assessment import utc_datetime
-from app.service.training_csv import TrainingCsvError, encode_training_csv, validate_row
+from app.service.training_csv import (
+    TrainingCsvError,
+    encode_training_csv,
+    parse_training_csv,
+    validate_row,
+)
 
 DATASET_ID = "training"
 
@@ -140,6 +147,7 @@ VERSION_FIELDS = [
     "byte_size",
     "last_error",
     "retry_of",
+    "source_manifest",
 ]
 
 
@@ -315,6 +323,8 @@ class DatasetRepository:
 
     def _collect(self, connection):
         """Capture closed-test sources under the same locks used by grading/editing."""
+        # Only truly finished tests (ended early or past their deadline) are
+        # captured; an upcoming test cannot have submissions yet.
         closed = (
             connection.execute(
                 select(tests)
@@ -332,9 +342,22 @@ class DatasetRepository:
         )
         states = []
         for test in closed:
+            # The accepted snapshot's identity must change the fingerprint, so a
+            # (re)created grading job rebuilds the ledger instead of being masked.
+            job_id = (
+                select(grading_jobs.c.id)
+                .where(
+                    grading_jobs.c.attempt_id == attempts.c.id,
+                    grading_jobs.c.submission_version
+                    == attempts.c.submission_version,
+                )
+                .correlate(attempts)
+                .scalar_subquery()
+                .label("job_id")
+            )
             submitted = (
                 connection.execute(
-                    select(attempts)
+                    select(attempts, job_id)
                     .where(
                         attempts.c.test_id == test["id"],
                         attempts.c.submitted_at.isnot(None),
@@ -356,6 +379,7 @@ class DatasetRepository:
                         item["status"],
                         item["submission_version"],
                         item["revision"],
+                        item["job_id"],
                     )
                     for item in sorted(
                         latest.values(), key=lambda value: value["user_id"]
@@ -544,15 +568,29 @@ class DatasetRepository:
 
     @staticmethod
     def _rows(connection, seed):
+        # The manifest names each contributing course/test so version history can
+        # explain where appended rows came from.
         sources = (
             connection.execute(
-                select(dataset_source_rows).order_by(dataset_source_rows.c.source_key)
+                select(
+                    dataset_source_rows,
+                    tests.c.test_name,
+                    courses.c.course_code,
+                    courses.c.course_name,
+                )
+                .join(tests, tests.c.id == dataset_source_rows.c.test_id)
+                .join(courses, courses.c.id == tests.c.course_id)
+                .order_by(dataset_source_rows.c.source_key)
             )
             .mappings()
             .all()
         )
         return seed + [item["row"] for item in sources], [
-            {key: value for key, value in item.items() if key != "row"}
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"row", "course_id"}
+            }
             for item in sources
         ]
 
@@ -702,6 +740,17 @@ class DatasetRepository:
                 )
                 self._mark_exports(connection, dataset["active_version_id"])
                 return None
+            # Guard the contract shared with the original upload: re-parse the
+            # exact bytes that will be published so appended rows cannot ship
+            # a file that violates the reference rubric CSV schema.
+            try:
+                validated = parse_training_csv(io.BytesIO(payload))
+            except TrainingCsvError as exc:
+                raise TrainingCsvError(f"Published CSV failed validation: {exc}") from exc
+            if len(validated) != len(rows):
+                raise TrainingCsvError(
+                    "Published CSV row count does not match the dataset ledger."
+                )
             key = f"training-datasets/{DATASET_ID}/versions/{job['id']}/{checksum}/dataset.csv"
             staged = list(dict.fromkeys([*version["staged_keys"], key]))
             values = {

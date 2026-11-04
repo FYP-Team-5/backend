@@ -82,6 +82,7 @@ async def create_test_from_csv(
     file: Annotated[UploadFile, File()],
     test_name: Annotated[str, Form(min_length=1, max_length=300)],
     ends_at: Annotated[AwareDatetime, Form()],
+    starts_at: Annotated[AwareDatetime | None, Form()] = None,
     max_attempts: Annotated[int, Form(ge=1, le=100)] = 1,
 ) -> Test:
     try:
@@ -89,7 +90,9 @@ async def create_test_from_csv(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=422, detail="CSV file must be UTF-8 encoded.") from exc
     try:
-        return await service.create_test_from_csv(course_id, test_name, max_attempts, content, ends_at)
+        return await service.create_test_from_csv(
+            course_id, test_name, max_attempts, content, ends_at, starts_at
+        )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except CsvFormatError as exc:

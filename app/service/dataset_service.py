@@ -12,7 +12,7 @@ from app.db.dataset_repository import DatasetRepository
 from app.db.grading_repository import GradingConflictError
 from app.db.grading_workflow import LeaseLostError
 from app.service.dataset_storage import DatasetStorage, DatasetStorageError
-from app.service.training_csv import parse_training_csv
+from app.service.training_csv import TrainingCsvError, parse_training_csv
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ class DatasetService:
                     self.repository.fail,
                     job,
                     str(exc)
-                    if isinstance(exc, DatasetStorageError)
+                    if isinstance(exc, (DatasetStorageError, TrainingCsvError))
                     else "Dataset publication failed; retry or check server logs.",
                     retry=job["claim_count"] <= self.settings.dataset_max_retries,
                     delay=self.settings.dataset_retry_seconds

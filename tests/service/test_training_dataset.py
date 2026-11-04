@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select, update
 
 from app.config import Settings
 from app.db import GradingConflictError, PostgresGradingRepository
-from app.db.dataset_repository import dataset_versions
+from app.db.dataset_repository import dataset_source_rows, dataset_versions
 from app.db.grading_repository import tests
 from app.db.grading_workflow import LeaseLostError
 from app.dto import (
@@ -238,6 +238,29 @@ def test_closed_test_data_appends_once_and_uploads_preserve_generated_rows(datas
     drain(service)
     assert len(download(service)[0]) == 3
     assert active["status"] == "ready"
+
+
+def test_merged_export_is_validated_before_publication(dataset):
+    service, grader, test, _ = dataset
+    upload(service)
+    drain(service)
+    submit(grader, test)
+    grader.workflow.end_test(test.id, "instructor")
+    service.repository.reconcile()
+    # A source row that violates the reference contract must block publication.
+    with service.repository.engine.begin() as connection:
+        source = connection.execute(select(dataset_source_rows)).mappings().one()
+        corrupted = dict(source["row"])
+        corrupted["student_score"] = 99
+        connection.execute(
+            update(dataset_source_rows)
+            .where(dataset_source_rows.c.source_key == source["source_key"])
+            .values(row=corrupted)
+        )
+    job = service.repository.claim(60, 3)
+    assert job is not None and job["source"] == "test_export"
+    with pytest.raises(TrainingCsvError, match="Published CSV failed validation"):
+        service.repository.prepare(job)
 
 
 def test_deadline_collection_bootstraps_without_page_traffic(dataset):

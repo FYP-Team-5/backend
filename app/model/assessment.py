@@ -58,18 +58,25 @@ class Test(BaseModel):
     max_attempts: int
     questions: list[Question]
     created_at: datetime
+    starts_at: datetime | None = None
     ends_at: datetime | None = None
     ended_at: datetime | None = None
     ended_by: str | None = None
 
-    _utc = field_validator("ends_at", "ended_at")(utc_datetime)
+    _utc = field_validator("starts_at", "ends_at", "ended_at")(utc_datetime)
 
     @computed_field
     @property
     def is_closed(self) -> bool:
-        return self.ended_at is not None or (
-            self.ends_at is not None and datetime.now(UTC) >= self.ends_at
-        )
+        # Open only inside the [starts_at, ends_at) window, unless an
+        # instructor ended the test early. A missing start date means the
+        # test is open from creation.
+        if self.ended_at is not None:
+            return True
+        now = datetime.now(UTC)
+        if self.starts_at is not None and now < self.starts_at:
+            return True
+        return self.ends_at is not None and now >= self.ends_at
 
 
 class Attempt(BaseModel):
