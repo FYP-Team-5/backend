@@ -207,8 +207,14 @@ The backend creates these accounts automatically when `SEED_DEMO_USERS=true`
 
 | Role | Username (email) | Password |
 |---|---|---|
-| Student | `student@demo.example.com` | `StudentDemo123!` |
-| Instructor | `instructor@demo.example.com` | `InstructorDemo123!` |
+| Student | `student@example.com` | `Password123!` |
+| Student | `student2@example.com` | `Password123!` |
+| Instructor | `instructor@example.com` | `Password123!` |
+
+When demo seeding is enabled, the backend also creates the `DEMO101` course
+with two identical tests and one completed graded attempt for each demo student
+in each test. The first student receives 10/10 and the second receives 8/10,
+which provides data for student history and instructor submission views.
 
 Passwords are stored as salted hashes. Startup creates missing accounts and
 preserves existing accounts, including their passwords, roles, profiles, and

@@ -58,19 +58,28 @@ class IdentityService:
         accounts = (
             (
                 StudentRegistration(
-                    email="student@demo.example.com",
+                    email="student@example.com",
                     full_name="Demo Student",
                     student_number="DEMO-STUDENT",
-                    password="StudentDemo123!",
+                    password="Password123!",
+                ),
+                self.repository.create_student,
+            ),
+            (
+                StudentRegistration(
+                    email="student2@example.com",
+                    full_name="Demo Student 2",
+                    student_number="DEMO-STUDENT-2",
+                    password="Password123!",
                 ),
                 self.repository.create_student,
             ),
             (
                 StaffRegistration(
-                    email="instructor@demo.example.com",
+                    email="instructor@example.com",
                     full_name="Demo Instructor",
                     staff_number="DEMO-INSTRUCTOR",
-                    password="InstructorDemo123!",
+                    password="Password123!",
                 ),
                 self.repository.create_staff,
             ),

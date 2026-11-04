@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import (
     JSON,
@@ -20,7 +20,9 @@ from sqlalchemy import (
     delete,
     func,
     insert,
+    inspect,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import Connection, Engine, RowMapping
@@ -232,6 +234,45 @@ class PostgresGradingRepository:
 
     def initialize(self) -> None:
         grading_metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            column_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if self.engine.dialect.name == "postgresql"
+                else "DATETIME"
+            )
+            migrations = {
+                "grading_tests": (
+                    ("ends_at", f"{column_type} NULL"),
+                    ("ended_at", f"{column_type} NULL"),
+                    ("ended_by", "VARCHAR(128) NULL"),
+                ),
+                "grading_attempts": (
+                    ("submitted_at", f"{column_type} NULL"),
+                    ("submission_version", "INTEGER NOT NULL DEFAULT 0"),
+                    ("revision", "INTEGER NOT NULL DEFAULT 0"),
+                ),
+                "grading_responses": (
+                    ("criterion_scores", "JSON NULL"),
+                    ("original_score", "FLOAT NULL"),
+                    ("original_feedback", "TEXT NULL"),
+                    ("overridden", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                    ("edited_by", "VARCHAR(128) NULL"),
+                    ("edited_at", f"{column_type} NULL"),
+                ),
+            }
+            for table_name, columns in migrations.items():
+                existing_columns = {
+                    column["name"]
+                    for column in inspect(connection).get_columns(table_name)
+                }
+                for column_name, definition in columns:
+                    if column_name not in existing_columns:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE {table_name} ADD COLUMN "
+                                f"{column_name} {definition}"
+                            )
+                        )
 
     def close(self) -> None:
         self.engine.dispose()
@@ -352,6 +393,68 @@ class PostgresGradingRepository:
         except IntegrityError as exc:
             raise GradingConflictError("Test identifiers already exist.") from exc
         return self.get_test(test_id)
+
+    def delete_test(self, test_id: str) -> None:
+        with self.engine.begin() as connection:
+            question_ids = connection.execute(
+                select(questions.c.id).where(questions.c.test_id == test_id)
+            ).scalars().all()
+            rubric_ids = connection.execute(
+                select(questions.c.rubric_id).where(
+                    questions.c.test_id == test_id,
+                    questions.c.rubric_id.is_not(None),
+                )
+            ).scalars().all()
+            attempt_ids = connection.execute(
+                select(attempts.c.id).where(attempts.c.test_id == test_id)
+            ).scalars().all()
+            response_ids = (
+                connection.execute(
+                    select(responses.c.id).where(
+                        responses.c.attempt_id.in_(attempt_ids)
+                    )
+                ).scalars().all()
+                if attempt_ids
+                else []
+            )
+            if response_ids:
+                connection.execute(
+                    delete(grade_changes).where(
+                        grade_changes.c.response_id.in_(response_ids)
+                    )
+                )
+                connection.execute(
+                    delete(criteria_met).where(
+                        criteria_met.c.response_id.in_(response_ids)
+                    )
+                )
+                connection.execute(
+                    delete(responses).where(responses.c.id.in_(response_ids))
+                )
+            if attempt_ids:
+                connection.execute(
+                    delete(grading_jobs).where(
+                        grading_jobs.c.attempt_id.in_(attempt_ids)
+                    )
+                )
+                connection.execute(
+                    delete(attempts).where(attempts.c.id.in_(attempt_ids))
+                )
+            if question_ids:
+                connection.execute(
+                    delete(examples).where(examples.c.question_id.in_(question_ids))
+                )
+                connection.execute(
+                    delete(questions).where(questions.c.id.in_(question_ids))
+                )
+            if rubric_ids:
+                connection.execute(
+                    delete(criteria).where(criteria.c.rubric_id.in_(rubric_ids))
+                )
+                connection.execute(
+                    delete(rubrics).where(rubrics.c.id.in_(rubric_ids))
+                )
+            connection.execute(delete(tests).where(tests.c.id == test_id))
 
     def set_question_rubric(
         self, test_id: str, question_id: str, request: RubricCreate
@@ -549,6 +652,125 @@ class PostgresGradingRepository:
         except IntegrityError as exc:
             raise GradingConflictError("Concurrent attempt creation conflicted.") from exc
         return self.get_attempt(attempt_id)
+
+    def create_completed_attempt(
+        self,
+        *,
+        test_id: str,
+        user_id: str,
+        responses_by_external_id: dict[str, tuple[str, float, str, set[int]]],
+    ) -> Attempt:
+        """Create an idempotent, already-graded attempt for local demo data."""
+        now = datetime.now(UTC)
+        attempt_id = str(uuid.uuid4())
+        existing_id: str | None = None
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(attempts.c.id).where(
+                    attempts.c.test_id == test_id,
+                    attempts.c.user_id == user_id,
+                    attempts.c.attempt_number == 1,
+                )
+            ).scalar_one_or_none()
+            existing_id = existing
+            question_rows = connection.execute(
+                select(questions)
+                .where(questions.c.test_id == test_id)
+                .order_by(questions.c.position)
+            ).mappings().all()
+            if not question_rows:
+                raise GradingRecordNotFoundError(test_id)
+            if existing is None:
+                connection.execute(
+                    insert(attempts).values(
+                        id=attempt_id,
+                        test_id=test_id,
+                        user_id=user_id,
+                        attempt_number=1,
+                        status="graded",
+                        started_at=now - timedelta(minutes=10),
+                        submitted_at=now - timedelta(minutes=5),
+                        submission_version=1,
+                        revision=1,
+                        graded_at=now,
+                    )
+                )
+            for question in question_rows:
+                    external_id = question["external_id"]
+                    answer, score, feedback, met_indexes = responses_by_external_id[
+                        external_id
+                    ]
+                    score = min(score, question["max_score"])
+                    response_row = connection.execute(
+                        select(responses).where(
+                            responses.c.attempt_id == (existing or attempt_id),
+                            responses.c.question_id == question["id"],
+                        )
+                    ).mappings().first()
+                    response_id = response_row["id"] if response_row else str(uuid.uuid4())
+                    criterion_ids = (
+                        connection.execute(
+                            select(criteria.c.id)
+                            .where(criteria.c.rubric_id == question["rubric_id"])
+                            .order_by(criteria.c.id)
+                        ).scalars().all()
+                        if question["rubric_id"] is not None
+                        else []
+                    )
+                    criterion_scores = [
+                        {
+                            "criteria_id": criterion_id,
+                            "score": (
+                                1 if index in met_indexes else 0
+                            ),
+                        }
+                        for index, criterion_id in enumerate(criterion_ids)
+                    ]
+                    response_values = {
+                        "answer": answer,
+                        "score": score,
+                        "feedback": feedback,
+                        "criterion_scores": criterion_scores,
+                        "original_score": score,
+                        "original_feedback": feedback,
+                        "overridden": False,
+                        "edited_by": None,
+                        "edited_at": None,
+                        "updated_at": now,
+                    }
+                    if response_row is None:
+                        connection.execute(
+                            insert(responses).values(
+                                id=response_id,
+                                attempt_id=existing or attempt_id,
+                                question_id=question["id"],
+                                created_at=now - timedelta(minutes=5),
+                                **response_values,
+                            )
+                        )
+                    else:
+                        connection.execute(
+                            update(responses)
+                            .where(responses.c.id == response_id)
+                            .values(**response_values)
+                        )
+                    connection.execute(
+                        delete(criteria_met).where(criteria_met.c.response_id == response_id)
+                    )
+                    if criterion_ids:
+                            connection.execute(
+                                insert(criteria_met),
+                                [
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "response_id": response_id,
+                                    "criteria_id": criterion_id,
+                                    "is_met": index in met_indexes,
+                                }
+                                for index, criterion_id in enumerate(criterion_ids)
+                            ],
+                        )
+        return self.get_attempt(existing_id or attempt_id)
 
     def get_attempt(self, attempt_id: str) -> Attempt:
         try:

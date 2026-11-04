@@ -1,0 +1,7 @@
+id,criteria,criteria_max_score,model_answer
+1.1,Answer mentions simulating behaviour of portions of desired software,1,To simulate the behaviour of portions of the desired software product.
+1.2,Answer mentions coding/implementation stage,1,"The coding/implementation stage and the solution refinement stage."
+1.2,Answer mentions solution refinement stage,1,
+1.6,Answer mentions variables can be declared anywhere in program,1,"Variables can be declared anywhere in the program: local variables inside functions, and global variables outside functions."
+1.6,Answer mentions local variables can be declared inside functions,1,
+1.6,Answer mentions global variables can be declared outside functions,1,

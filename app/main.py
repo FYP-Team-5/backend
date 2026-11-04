@@ -25,6 +25,7 @@ from app.service import (
     UserService,
 )
 from app.service.dataset_service import DatasetService
+from app.service.demo_data import DemoDataService
 
 OPENAPI_TAGS = [
     {
@@ -77,6 +78,11 @@ def create_app(
         await identity_service.initialize()
         await grading_service.initialize()
         await dataset_service.initialize()
+        if settings.seed_demo_users:
+            await DemoDataService(
+                grading_store=grading_service.grading_store,
+                user_repository=identity_service.repository,
+            ).seed()
         try:
             yield
         finally:
