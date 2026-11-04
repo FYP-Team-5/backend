@@ -13,6 +13,10 @@ from app.service.csv_import import parse_criteria_csv, parse_questions_csv
 
 DEMO_COURSE_CODE = "DEMO101"
 DEMO_TEST_NAMES = ("Demo Test 1", "Demo Test 2")
+# Demo learners (created by UserService's startup accounts) that submit attempts.
+DEMO_STUDENT_EMAILS = frozenset(
+    {"student@example.com", "student2@example.com"}
+)
 DEMO_DATA_DIRECTORY = Path(__file__).parents[1] / "demo" / "criteria"
 DEMO_TRAINING_DATASET = (
     Path(__file__).parents[1] / "demo" / "dataset" / "training_data_moh_eng_rubrics.csv"
@@ -96,7 +100,7 @@ class DemoDataService:
             question.rubric = rubrics[question.external_id]
         return TestCreate(
             test_name=test_name,
-            max_attempts=1,
+            max_attempts=10,
             ends_at=datetime.now(UTC) + timedelta(days=365),
             questions=questions,
         )
@@ -105,11 +109,7 @@ class DemoDataService:
         students = [
             user
             for user in self.user_repository.list()
-            if user.role == "student"
-            and user.email in {
-                "student@example.com",
-                "student2@example.com",
-            }
+            if user.role == "student" and user.email in DEMO_STUDENT_EMAILS
         ]
         responses = {
             "1.1": (
@@ -157,13 +157,37 @@ class DemoDataService:
                 {1, 2},
             ),
         }
+        weak_responses = {
+            "1.1": (
+                "A prototype is an early model of the software.",
+                0,
+                "Does not explain that a prototype simulates the desired software.",
+                set(),
+            ),
+            "1.2": (
+                "Testing influences the implementation stage of the life cycle.",
+                1,
+                "Identifies implementation but not solution refinement.",
+                {0},
+            ),
+            "1.6": (
+                "Global variables are declared outside functions.",
+                1,
+                "Covers global declarations only; local declarations are missing.",
+                {2},
+            ),
+        }
+        profiles = {
+            "student@example.com": (partial_responses, weak_responses, responses),
+            "student2@example.com": (weak_responses, partial_responses, partial_responses),
+        }
         for student in students:
-            self.grading_store.create_completed_attempt(
-                test_id=test_id,
-                user_id=student.id,
-                responses_by_external_id=(
-                    responses
-                    if student.email == "student@example.com"
-                    else partial_responses
-                ),
-            )
+            for attempt_number, attempt_profile in enumerate(
+                profiles.get(student.email, (partial_responses,) * 3), start=1
+            ):
+                self.grading_store.create_completed_attempt(
+                    test_id=test_id,
+                    user_id=student.id,
+                    responses_by_external_id=attempt_profile,
+                    attempt_number=attempt_number,
+                )

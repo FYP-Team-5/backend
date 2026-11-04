@@ -49,6 +49,7 @@ def test_startup_accounts_can_log_in_and_survive_restart(
     assert [course.course_code for course in courses] == ["DEMO101"]
     tests = grading_service.grading_store.list_tests(courses[0].id)
     assert [test.test_name for test in tests] == ["Demo Test 1", "Demo Test 2"]
+    assert all(test.max_attempts == 10 for test in tests)
     assert all(
         [question.external_id for question in test.questions] == ["1.1", "1.2", "1.6"]
         and all(question.grading_method == "rubric" for question in test.questions)
@@ -60,7 +61,7 @@ def test_startup_accounts_can_log_in_and_survive_restart(
         for student in identity_service.repository.list()
         if student.role == "student"
         for attempt in grading_service.grading_store.list_attempts(test.id, student.id)
-    ] == ["graded", "graded", "graded", "graded"]
+    ] == ["graded"] * 12
 
 
 def test_startup_preserves_existing_account_credentials_and_inactive_status(

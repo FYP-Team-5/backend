@@ -666,9 +666,12 @@ class PostgresGradingRepository:
         test_id: str,
         user_id: str,
         responses_by_external_id: dict[str, tuple[str, float, str, set[int]]],
+        attempt_number: int = 1,
     ) -> Attempt:
         """Create an idempotent, already-graded attempt for local demo data."""
         now = datetime.now(UTC)
+        # Spread seeded attempts into the recent past so timelines look natural.
+        now = now - timedelta(days=max(0, 3 - attempt_number))
         attempt_id = str(uuid.uuid4())
         # Accepted snapshot for the mock grading job, mirroring accept_submission.
         test_snapshot = self.get_test(test_id).model_dump(mode="json")
@@ -678,7 +681,7 @@ class PostgresGradingRepository:
                 select(attempts.c.id).where(
                     attempts.c.test_id == test_id,
                     attempts.c.user_id == user_id,
-                    attempts.c.attempt_number == 1,
+                    attempts.c.attempt_number == attempt_number,
                 )
             ).scalar_one_or_none()
             existing_id = existing
@@ -695,7 +698,7 @@ class PostgresGradingRepository:
                         id=attempt_id,
                         test_id=test_id,
                         user_id=user_id,
-                        attempt_number=1,
+                        attempt_number=attempt_number,
                         status="graded",
                         started_at=now - timedelta(minutes=10),
                         submitted_at=now - timedelta(minutes=5),
