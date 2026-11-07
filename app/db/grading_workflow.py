@@ -77,7 +77,9 @@ class GradingWorkflowRepository:
                 )
             if ends_at <= datetime.now(UTC):
                 raise GradingConflictError("End date must be in the future.")
-            if row["starts_at"] is not None and ends_at <= utc_datetime(row["starts_at"]):
+            if row["starts_at"] is not None and ends_at <= utc_datetime(
+                row["starts_at"]
+            ):
                 raise GradingConflictError("End date must be after the start date.")
             connection.execute(
                 update(tests).where(tests.c.id == test_id).values(ends_at=ends_at)
@@ -99,7 +101,12 @@ class GradingWorkflowRepository:
         return self.store.get_test(test_id)
 
     def accept_submission(
-        self, test: Test, attempt_id: str, user_id: str, request: GradeAttemptRequest
+        self,
+        test: Test,
+        attempt_id: str,
+        user_id: str,
+        request: GradeAttemptRequest,
+        model_config: dict | None = None,
     ) -> Attempt:
         payload = request.model_dump(mode="json")
         payload["responses"] = sorted(
@@ -170,6 +177,8 @@ class GradingWorkflowRepository:
                 if previous is not None
                 else test.model_dump(mode="json")
             )
+            if previous is None and model_config:
+                snapshot["_grading_model"] = model_config
             connection.execute(
                 insert(grading_jobs).values(
                     id=str(uuid.uuid4()),

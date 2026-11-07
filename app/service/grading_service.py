@@ -100,6 +100,7 @@ class GradingService:
             max_tokens=settings.llm_max_tokens,
         )
         self.workflow = GradingWorkflowRepository(self.grading_store)
+        self.model_registry = None
         self._worker_task: asyncio.Task | None = None
         self._wake = asyncio.Event()
 
@@ -307,12 +308,22 @@ class GradingService:
             submission.answer = submission.answer.strip()
             if len(submission.answer) > self.settings.max_answer_characters:
                 raise StudentAnswerTooLargeError("Answer exceeds the character limit.")
+        model_config = (
+            await asyncio.to_thread(self.model_registry.active_config)
+            if self.model_registry
+            else None
+        ) or {
+            "name": self.settings.llm_model,
+            "contract": "grading_json_v1",
+            "fewshot_name": self.settings.llm_model,
+        }
         accepted = await asyncio.to_thread(
             self.workflow.accept_submission,
             test,
             attempt_id,
             user_id,
             normalized,
+            model_config,
         )
         self._wake.set()
         return accepted
@@ -402,6 +413,7 @@ class GradingService:
 
     async def _process_job(self, job: dict) -> None:
         test = Test.model_validate(job["snapshot"])
+        model_config = job["snapshot"].get("_grading_model", {})
         questions_by_id = {question.id: question for question in test.questions}
         saved = await asyncio.to_thread(
             self.grading_store.list_responses, job["attempt_id"]
@@ -420,10 +432,45 @@ class GradingService:
             try:
                 method = self._resolve_grading_method(question)
                 if method == "rubric":
-                    result = await self.llm.grade(
-                        system_prompt=SYSTEM_PROMPT_RUBRIC,
-                        user_prompt=self._grading_prompt(question, response.answer),
-                    )
+                    if self.model_registry:
+                        await self.model_registry.ensure_model(model_config)
+                    if model_config.get("contract") == "criteria_array_v1":
+                        from app.dto import CriteriaGradingResult
+
+                        criteria = question.rubric.criteria
+                        labels = await self.llm.grade_binary(
+                            question=question.prompt,
+                            desired_answer=question.model_answer or "",
+                            student_answer=response.answer,
+                            criteria=[item.description for item in criteria],
+                            model=model_config["name"],
+                        )
+                        result = CriteriaGradingResult(
+                            score=sum(
+                                item.score * label
+                                for item, label in zip(criteria, labels)
+                            ),
+                            feedback="\n".join(
+                                f"{'Met' if label else 'Not met'}: {item.description}"
+                                for item, label in zip(criteria, labels)
+                            ),
+                            criteria_met=[
+                                {"criteria_id": item.id, "is_met": bool(label)}
+                                for item, label in zip(criteria, labels)
+                            ],
+                        )
+                    else:
+                        overrides = (
+                            {"model": model_config["name"]}
+                            if model_config.get("name")
+                            and model_config["name"] != self.settings.llm_model
+                            else {}
+                        )
+                        result = await self.llm.grade(
+                            system_prompt=SYSTEM_PROMPT_RUBRIC,
+                            user_prompt=self._grading_prompt(question, response.answer),
+                            **overrides,
+                        )
                     known_ids = {item.id for item in question.rubric.criteria}
                     unknown = {
                         item.criteria_id for item in result.criteria_met
@@ -436,9 +483,18 @@ class GradingService:
                         item.model_dump() for item in result.criteria_met
                     ]
                 else:
+                    fewshot_model = model_config.get(
+                        "fewshot_name", self.settings.llm_model
+                    )
+                    overrides = (
+                        {"model": fewshot_model}
+                        if fewshot_model != self.settings.llm_model
+                        else {}
+                    )
                     result = await self.llm.grade_fewshot(
                         system_prompt=SYSTEM_PROMPT_FEWSHOT,
                         user_prompt=self._fewshot_prompt(question, response.answer),
+                        **overrides,
                     )
                     criteria_results = []
                 self._validate_score_scale(result.score, question)

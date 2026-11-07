@@ -16,6 +16,7 @@ from app.controller import (
 )
 from app.controller.submissions import router as submissions_router
 from app.controller.training_dataset import router as training_dataset_router
+from app.controller.training_runs import router as training_runs_router
 from app.service import (
     AttemptService,
     AuthService,
@@ -26,28 +27,20 @@ from app.service import (
 )
 from app.service.dataset_service import DatasetService
 from app.service.demo_data import DemoDataService
+from app.service.model_registry import ModelRegistry
 
 OPENAPI_TAGS = [
-    {
-        "name": "health",
-        "description": "Storage and LLM dependency readiness status."
-    },
+    {"name": "health", "description": "Storage and LLM dependency readiness status."},
     {
         "name": "authentication",
         "description": "Register student/staff accounts and issue access tokens.",
     },
-    {
-        "name": "users",
-        "description": "Inspect and administer user profiles."
-    },
+    {"name": "users", "description": "Inspect and administer user profiles."},
     {
         "name": "catalog",
         "description": "Manage courses and tests, each with its own questions and rubrics.",
     },
-    {
-        "name": "attempts",
-        "description": "Create and inspect student attempts."
-    },
+    {"name": "attempts", "description": "Create and inspect student attempts."},
     {
         "name": "grading",
         "description": "Grade one or more responses within a student attempt.",
@@ -65,7 +58,12 @@ def create_app(
     settings = settings or get_settings()
     identity_service = identity_service or IdentityService(settings)
     grading_service = grading_service or GradingService(settings)
-    dataset_service = dataset_service or DatasetService(settings, grading_service.grading_store)
+    dataset_service = dataset_service or DatasetService(
+        settings, grading_service.grading_store
+    )
+
+    model_registry = ModelRegistry(settings, grading_service.grading_store)
+    grading_service.model_registry = model_registry
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -78,6 +76,7 @@ def create_app(
         await identity_service.initialize()
         await grading_service.initialize()
         await dataset_service.initialize()
+        await model_registry.initialize()
         if settings.seed_demo_users:
             await DemoDataService(
                 grading_store=grading_service.grading_store,
@@ -87,6 +86,7 @@ def create_app(
         try:
             yield
         finally:
+            await model_registry.close()
             await dataset_service.close()
             await grading_service.close()
             await identity_service.close()
@@ -94,9 +94,7 @@ def create_app(
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
-        description=(
-            "Backend Services"
-        ),
+        description=("Backend Services"),
         lifespan=lifespan,
         openapi_tags=OPENAPI_TAGS,
         docs_url="/docs",
@@ -108,6 +106,7 @@ def create_app(
     app.state.identity_service = identity_service
     app.state.grading_service = grading_service
     app.state.dataset_service = dataset_service
+    app.state.model_registry = model_registry
     app.state.auth_service = AuthService(identity_service)
     app.state.user_service = UserService(identity_service)
     app.state.catalog_service = CatalogService(grading_service)
@@ -127,6 +126,7 @@ def create_app(
     app.include_router(tests_router, prefix=settings.api_v1_prefix)
     app.include_router(submissions_router, prefix=settings.api_v1_prefix)
     app.include_router(training_dataset_router, prefix=settings.api_v1_prefix)
+    app.include_router(training_runs_router, prefix=settings.api_v1_prefix)
 
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:

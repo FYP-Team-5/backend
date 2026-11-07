@@ -601,3 +601,13 @@ up their own objects. If the QLoRA checkout is present, round-trip tests use all
 3,778 reference rows; otherwise they use the committed small reference fixture.
 No migration or database reset commands are added. Initialize a fresh schema
 with the existing `create_all()` approach.
+
+## Nightly model candidates and explicit deployment
+
+The deployment workflow publishes evaluated adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics.
+
+Verified instructors use `GET /api/v1/training-runs` and `POST /api/v1/training-runs/{run_id}/deploy` with `{"revision": <current revision>}`. Deployment returns 202 and runs through a persisted PostgreSQL worker. It validates the pinned adapter's files/base model/rank, loads a separate vLLM alias and checks grading responses before atomically updating the active pointer. Failed or stale work cannot replace the active model; the page shows status and a retry action. Choosing a previous candidate explicitly supports rollback. This repository has an instructor role; no separate admin role is introduced.
+
+Set the backend `TRAINING_HF_REPO`, optional private-repo `TRAINING_HF_TOKEN`, `TRAINING_CALLBACK_TOKEN` and shared `MODEL_ADAPTER_DIRECTORY` as described in `.env.example`. The host's updated vLLM wrapper must opt into runtime LoRA loading and the filesystem resolver, with the same adapter directory path available inside the API container. Keep vLLM administration private. See the deployment repository's `autotraining/README.md` for credential names and serving configuration; these changes do not replace the serving EC2 instance.
+
+The binary rubric contract is supported explicitly: criterion labels must be exactly aligned integer 0/1 values and map to saved weights/criterion ids; feedback identifies met/unmet criteria. Few-shot grading uses the original configured model. Accepted jobs save the rubric model name/contract/HF revision and retain it through retries and partial submissions. Missing approved adapter cache files can be restored from that exact HF revision.
