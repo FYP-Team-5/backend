@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     training_callback_token: str | None = None
     training_hf_repo: str = "SmuFypTeam5/GradingQlora"
-    training_hf_token: str | None = None
     training_adapter_directory: str = "/mnt/llm-data/adapters"
     training_max_lora_rank: int = Field(default=64, ge=1, le=512)
 

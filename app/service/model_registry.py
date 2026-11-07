@@ -333,7 +333,7 @@ class ModelRegistry:
         snapshot_download(
             repo_id=manifest["hf_repo"],
             revision=manifest["hf_revision"],
-            token=self.settings.training_hf_token or False,
+            token=False,
             local_dir=directory,
             allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
         )

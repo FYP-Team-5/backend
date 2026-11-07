@@ -327,3 +327,33 @@ def test_actual_deployment_checks_loaded_model_with_both_binary_classes(
     }
     assert len(calls) == 3
     assert registry.active_config() is None  # Checks alone do not promote a model.
+
+
+def test_public_adapter_download_does_not_use_hf_credentials(
+    client, settings, tmp_path, monkeypatch
+):
+    import json
+    import sys
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    settings.training_adapter_directory = str(tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "unused-upload-token")
+
+    def download(**kwargs):
+        directory = Path(kwargs["local_dir"])
+        directory.mkdir(parents=True)
+        (directory / "adapter_config.json").write_text(
+            json.dumps({"base_model_name_or_path": "Qwen/Qwen3.5-9B", "r": 48})
+        )
+        (directory / "adapter_model.safetensors").write_bytes(b"example weights")
+
+    snapshot = MagicMock(side_effect=download)
+    monkeypatch.setitem(
+        sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=snapshot)
+    )
+    manifest = candidate()
+    client.app.state.model_registry.download(manifest)
+    assert snapshot.call_args.kwargs["token"] is False
+    assert snapshot.call_args.kwargs["revision"] == manifest["hf_revision"]
