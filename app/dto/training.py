@@ -4,6 +4,7 @@ import json
 import math
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -77,3 +78,15 @@ class DeployRequest(BaseModel):
 
 class TrainingDeploymentResponse(BaseModel):
     status: Literal["queued", "deployed"]
+
+
+class TrainingStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+
+
+class TrainingStartResponse(BaseModel):
+    status: Literal["accepted"] = "accepted"
+    request_id: UUID
+    execution_arn: str

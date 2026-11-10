@@ -4,6 +4,7 @@ import asyncio
 import secrets
 from typing import Annotated
 
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import ValidationError
 
@@ -16,7 +17,10 @@ from app.dto.training import (
     TrainingDeploymentResponse,
     TrainingRegistrationResponse,
     TrainingRunResponse,
+    TrainingStartRequest,
+    TrainingStartResponse,
 )
+from app.service.training_service import TrainingUnavailableError
 
 router = APIRouter(tags=["trained models"])
 
@@ -71,6 +75,31 @@ async def register(request: Request):
 )
 async def list_runs(request: Request):
     return await asyncio.to_thread(request.app.state.model_registry.list_runs)
+
+
+@router.post(
+    "/training-runs/start",
+    status_code=202,
+    dependencies=[Depends(require_api_key)],
+    response_model=TrainingStartResponse,
+)
+async def start_training(
+    payload: TrainingStartRequest,
+    request: Request,
+    instructor: Annotated[UserResponse, Depends(require_instructor)],
+):
+    try:
+        return await asyncio.to_thread(
+            request.app.state.training_service.start, instructor.id, payload
+        )
+    except TrainingUnavailableError as error:
+        raise HTTPException(503, str(error)) from error
+    except GradingConflictError as error:
+        raise HTTPException(409, str(error)) from error
+    except (ClientError, BotoCoreError):
+        raise HTTPException(
+            503, "Training could not be confirmed. Retry the same request."
+        ) from None
 
 
 @router.post(

@@ -28,6 +28,7 @@ from app.service import (
 from app.service.dataset_service import DatasetService
 from app.service.demo_data import DemoDataService
 from app.service.model_registry import ModelRegistry
+from app.service.training_service import TrainingService
 
 OPENAPI_TAGS = [
     {"name": "health", "description": "Storage and LLM dependency readiness status."},
@@ -107,6 +108,7 @@ def create_app(
     app.state.grading_service = grading_service
     app.state.dataset_service = dataset_service
     app.state.model_registry = model_registry
+    app.state.training_service = TrainingService(settings, dataset_service.repository)
     app.state.auth_service = AuthService(identity_service)
     app.state.user_service = UserService(identity_service)
     app.state.catalog_service = CatalogService(grading_service)

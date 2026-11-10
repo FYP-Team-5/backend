@@ -644,6 +644,31 @@ with the existing `create_all()` approach.
 
 ## Nightly model candidates and explicit deployment
 
+Instructors can select **Train now** on **Trained models** at any time. The
+backend starts the latest ready CSV through Step Functions, including datasets
+that were trained before. The GPU lock still prevents overlapping runs. Training
+produces a candidate branch; activating it remains a separate instructor action.
+
+Configure `TRAINING_STATE_MACHINE_ARN` with the deployment's
+`autotraining_state_machine_arn` output. The serving instance role already grants
+`states:StartExecution`; the browser receives no AWS credentials. New Terraform
+deployments set the ARN automatically. Existing hosts need the setting and a
+rebuilt API container.
+
+`POST /api/v1/training-runs/start` requires an instructor bearer token and the
+configured API key. Send `{"request_id": "<uuid>"}` and retain that UUID when
+retrying an uncertain response. A 202 acknowledges the workflow request; it does
+not mean GPU training has begun. An absent ready dataset returns 409, and missing
+workflow configuration or unavailable AWS access returns 503.
+
+The optional [one-row training demo](app/demo/training/README.md) runs three epochs
+using the pinned training notebook and saves weights locally. It never uploads
+or deploys them. It also supports offline row preparation:
+
+```bash
+python -m app.demo.training.single_row --prepare-only
+```
+
 The deployment workflow publishes evaluated adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics.
 
 Verified instructors use `GET /api/v1/training-runs` and `POST /api/v1/training-runs/{run_id}/deploy` with `{"revision": <current revision>}`. Deployment returns 202 and runs through a persisted PostgreSQL worker. It validates the pinned adapter's files/base model/rank, loads a separate vLLM alias and checks grading responses before atomically updating the active pointer. Failed or stale work cannot replace the active model; the page shows status and a retry action. Choosing a previous candidate explicitly supports rollback. This repository has an instructor role; no separate admin role is introduced.

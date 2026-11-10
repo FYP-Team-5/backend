@@ -1,10 +1,14 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
 from sqlalchemy import select
 
+from app.db import GradingConflictError
+from app.dto.training import TrainingStartResponse
 from app.service.model_registry import control, runs
 from tests.controller.test_submission_workflow import student
 
@@ -110,6 +114,98 @@ def test_training_api_openapi_describes_current_request_and_response_contracts(c
         "202"
     ]["content"]["application/json"]["schema"]
     assert deployment["$ref"].endswith("/TrainingDeploymentResponse")
+    manual = routes["/api/v1/training-runs/start"]["post"]
+    assert "202" in manual["responses"]
+    assert (
+        "request_id"
+        in schema["components"]["schemas"]["TrainingStartRequest"]["required"]
+    )
+
+
+def test_manual_training_is_instructor_only(client, instructor_headers):
+    starter = MagicMock()
+    client.app.state.training_service = starter
+    payload = {"request_id": str(uuid4())}
+    assert client.post("/api/v1/training-runs/start", json=payload).status_code == 401
+    student_headers, _ = student(client, "manual")
+    assert (
+        client.post(
+            "/api/v1/training-runs/start", json=payload, headers=student_headers
+        ).status_code
+        == 403
+    )
+    starter.start.assert_not_called()
+    starter.start.return_value = TrainingStartResponse(
+        request_id=payload["request_id"], execution_arn="arn:example:execution"
+    )
+    response = client.post(
+        "/api/v1/training-runs/start", json=payload, headers=instructor_headers
+    )
+    assert response.status_code == 202
+    assert response.json()["request_id"] == payload["request_id"]
+    assert starter.start.call_args.args[0].startswith("2")
+
+
+def test_unconfigured_manual_training_returns_actionable_error(
+    client, instructor_headers
+):
+    response = client.post(
+        "/api/v1/training-runs/start",
+        json={"request_id": str(uuid4())},
+        headers=instructor_headers,
+    )
+    assert response.status_code == 503
+    assert "not configured" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"request_id": "invalid"},
+        {"request_id": str(uuid4()), "force_retrain": False},
+    ],
+)
+def test_manual_training_validates_request(client, instructor_headers, payload):
+    starter = MagicMock()
+    client.app.state.training_service = starter
+    assert (
+        client.post(
+            "/api/v1/training-runs/start", json=payload, headers=instructor_headers
+        ).status_code
+        == 422
+    )
+    starter.start.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        (GradingConflictError("Upload a ready training dataset first."), 409),
+        (EndpointConnectionError(endpoint_url="https://private.example"), 503),
+        (
+            ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "sensitive-value"}},
+                "StartExecution",
+            ),
+            503,
+        ),
+    ],
+)
+def test_manual_training_errors_do_not_expose_sdk_details(
+    client, instructor_headers, error, status
+):
+    starter = MagicMock()
+    client.app.state.training_service = starter
+    starter.start.side_effect = error
+    response = client.post(
+        "/api/v1/training-runs/start",
+        json={"request_id": str(uuid4())},
+        headers=instructor_headers,
+    )
+    assert response.status_code == status
+    assert "sensitive-value" not in response.text
+    assert "private.example" not in response.text
 
 
 @pytest.mark.parametrize(
