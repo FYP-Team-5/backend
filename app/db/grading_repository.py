@@ -180,6 +180,14 @@ grading_jobs = Table(
     UniqueConstraint("attempt_id", "submission_version", name="uq_grading_job_version"),
 )
 
+criteria_evaluations = Table(
+    "grading_criteria_evaluations",
+    grading_metadata,
+    Column("response_id", ForeignKey("grading_responses.id"), primary_key=True),
+    Column("score", Float, nullable=False),
+    Column("criteria_results", JSON, nullable=False),
+)
+
 grade_changes = Table(
     "grading_grade_changes",
     grading_metadata,
@@ -425,6 +433,11 @@ class PostgresGradingRepository:
                 else []
             )
             if response_ids:
+                connection.execute(
+                    delete(criteria_evaluations).where(
+                        criteria_evaluations.c.response_id.in_(response_ids)
+                    )
+                )
                 connection.execute(
                     delete(grade_changes).where(
                         grade_changes.c.response_id.in_(response_ids)

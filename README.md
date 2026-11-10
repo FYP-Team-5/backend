@@ -142,13 +142,51 @@ rubric-based path, and nothing is persisted.
 
 ### LLM grading
 
-`LocalLLMClient` talks to any OpenAI-compatible chat-completions endpoint
-(the default `.env.example` points at a local Ollama instance) using
-`response_format: json_object`, then validates the returned JSON against
-`CriteriaGradingResult` (rubric mode: score, feedback, per-criterion
-met/unmet) or `FewShotGradingResult` (score, feedback). A criterion id the
-LLM invents that isn't in the question's rubric, or a score outside
-`[0, max_score]`, fails that response rather than being silently accepted.
+`LocalLLMClient` uses the configured OpenAI-compatible chat-completions endpoint.
+Rubric grading calls two different model aliases on that endpoint:
+
+1. `LLM_MODEL` returns a JSON array of integer labels such as `[1, 0]`, in rubric
+   order: `1` means met and `0` means not met. Booleans, other values and arrays
+   of the wrong length fail validation. The backend calculates the score from
+   the saved criterion weights and labels.
+2. `LLM_FEEDBACK_MODEL` receives the question, reference answer, student answer,
+   every criterion marked `[MET]` or `[NOT MET]`, and the number met. It returns
+   plain-text tutor feedback acknowledging correct work and explaining missing
+   or incorrect ideas. The prompt matches `feedback/qlora_feedback_qwen3.5-9B.ipynb`.
+   Feedback cannot change the saved labels or score.
+
+The grading decisions are checkpointed before feedback generation, so a feedback
+failure or restart retries feedback without rerunning successful grading. A
+response becomes complete only when its score, feedback and criterion records
+are saved together. Both model names are saved with accepted jobs and retained
+through retries and partial submissions. Existing API response shapes, including
+criterion-id/boolean `criteria_met` records, are unchanged.
+
+The default `LLM_GRADING_CONTRACT=criteria_array_v1` matches the grading LoRA.
+`grading_json_v1` remains available for older models/jobs; it requires exactly one
+decision per criterion and uses only those decisions to calculate the score.
+
+The DTOs distinguish each stage explicitly:
+
+| Schema | Purpose |
+| --- | --- |
+| `BinaryCriteriaResult` | Strict, nonempty integer 0/1 array from the grading LoRA |
+| `CriteriaEvaluationResult` | Criterion-only JSON object for the legacy grading contract |
+| `FeedbackResult` | Internal wrapper for plain-text feedback from the feedback model |
+| `CriteriaGradingResult` | Backend-assembled score, feedback and criterion decisions; never a grading-model parser |
+| `FewShotGradingResult` | Existing holistic few-shot JSON score/feedback result |
+
+`GradingOutputContract` is shared by settings and training callbacks. Callback,
+model-review and deployment schemas live in `app/dto/training.py` and appear in
+OpenAPI. Historical grading snapshots and API criterion-id/boolean records retain
+their existing shapes. Numeric assessment and grading scores must be finite so
+invalid Infinity/NaN values cannot enter JSON responses or persisted grades.
+
+Few-shot grading retains its existing JSON score/feedback contract and model.
+Both models must be available on `LLM_URL`; their aliases must differ. The
+deployment serving wrapper loads the grading and feedback adapters into the same
+Qwen3.5-9B process. For a private feedback repository, configure Hugging Face read
+access on the serving host or set `FEEDBACK_LORA_PATH` to a local adapter directory.
 
 ## Run locally
 
@@ -403,6 +441,8 @@ Grading runs in a persistent background job per submission — poll the last end
 | `SEED_DEMO_USERS` | `true` | Create the documented demo student and instructor accounts if missing at startup |
 | `LLM_URL` | local Ollama chat-completions URL | OpenAI-compatible grading endpoint |
 | `LLM_MODEL` | `local-model` | Model name sent in grading requests |
+| `LLM_GRADING_CONTRACT` | `criteria_array_v1` | Rubric output contract; `grading_json_v1` supports older criterion-object models |
+| `LLM_FEEDBACK_MODEL` | `qwen35-9b-feedback-qlora` | Separate model alias generating plain-text feedback from met/unmet decisions |
 | `LLM_API_KEY` | unset | Bearer token for the LLM endpoint, if it requires one |
 | `LLM_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` / `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` | `120` / `1` / `0` / `2048` | LLM request tuning |
 | `GRADING_POLL_SECONDS` | `1` | Pending/expired job scan interval |
@@ -601,3 +641,13 @@ up their own objects. If the QLoRA checkout is present, round-trip tests use all
 3,778 reference rows; otherwise they use the committed small reference fixture.
 No migration or database reset commands are added. Initialize a fresh schema
 with the existing `create_all()` approach.
+
+## Nightly model candidates and explicit deployment
+
+The deployment workflow publishes evaluated adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics.
+
+Verified instructors use `GET /api/v1/training-runs` and `POST /api/v1/training-runs/{run_id}/deploy` with `{"revision": <current revision>}`. Deployment returns 202 and runs through a persisted PostgreSQL worker. It validates the pinned adapter's files/base model/rank, loads a separate vLLM alias and checks grading responses before atomically updating the active pointer. Failed or stale work cannot replace the active model; the page shows status and a retry action. Choosing a previous candidate explicitly supports rollback. This repository has an instructor role; no separate admin role is introduced.
+
+The HF repository is public; candidate downloads are anonymous. Only the publisher needs an upload token, stored in SSM. Set the backend `TRAINING_HF_REPO`, `TRAINING_CALLBACK_TOKEN` and shared `MODEL_ADAPTER_DIRECTORY` as described in `.env.example`. The host's updated vLLM wrapper must opt into runtime LoRA loading and the filesystem resolver, with the same adapter directory path available inside the API container. Keep vLLM administration private. See the deployment repository's `autotraining/README.md` for credential names and serving configuration; these changes do not replace the serving EC2 instance.
+
+The binary rubric contract is supported explicitly: criterion labels must be exactly aligned integer 0/1 values and map to saved weights/criterion ids. A separate feedback model explains both met and unmet criteria using the feedback adapter's training prompt. Few-shot grading uses the original configured model. Accepted jobs save the rubric model name/contract/HF revision and feedback model name, retaining them through retries and partial submissions. Missing approved grading adapter cache files can be restored from that exact HF revision. Feedback adapter deployment is configured separately from the grading candidate registry.

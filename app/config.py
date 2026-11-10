@@ -3,6 +3,8 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.dto.grading import GradingOutputContract
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -20,11 +22,17 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     api_key: str | None = None
     cors_origins: str = "*"
+    training_callback_token: str | None = None
+    training_hf_repo: str = "SmuFypTeam5/GradingQlora"
+    training_adapter_directory: str = "/mnt/llm-data/adapters"
+    training_max_lora_rank: int = Field(default=64, ge=1, le=512)
 
     database_url: str = "postgresql+psycopg://user:change-me@localhost:5433/user"
 
     llm_url: str = "http://localhost:11434/v1/chat/completions"
     llm_model: str = "local-model"
+    llm_grading_contract: GradingOutputContract = "criteria_array_v1"
+    llm_feedback_model: str = Field(default="qwen35-9b-feedback-qlora", min_length=1)
     llm_api_key: str | None = None
     llm_timeout_seconds: float = Field(default=120, gt=0, le=600)
     llm_max_retries: int = Field(default=1, ge=0, le=10)

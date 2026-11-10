@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,13 +15,13 @@ from app.db.grading_repository import (
 )
 from app.db.grading_workflow import GradingWorkflowRepository, LeaseLostError
 from app.dto import (
-    CriteriaGradingResult,
+    FeedbackResult,
     GradeAttemptRequest,
     SubmissionGradeUpdate,
     TestCreate,
 )
 from app.service import GradingService
-from app.service.llm_client import LLMServiceError
+from app.service.llm_client import LLMResponseError, LLMServiceError
 
 
 class LLM:
@@ -28,13 +29,14 @@ class LLM:
         self.calls = []
         self.fail = set()
 
-    async def grade(self, *, system_prompt, user_prompt):
-        self.calls.append(user_prompt)
-        if any(answer in user_prompt for answer in self.fail):
+    async def grade_binary(self, **kwargs):
+        self.calls.append(json.dumps(kwargs))
+        if kwargs["student_answer"] in self.fail:
             raise LLMServiceError("Temporary outage")
-        return CriteriaGradingResult(
-            score=2, feedback="Automated feedback", criteria_met=[]
-        )
+        return [1, 0]
+
+    async def generate_feedback(self, **kwargs):
+        return FeedbackResult(feedback="Automated feedback")
 
     async def close(self):
         pass
@@ -59,7 +61,12 @@ def setup(tmp_path):
                     "prompt": f"Question {index}",
                     "max_score": 4,
                     "score_increment": 1,
-                    "rubric": {"criteria": [{"description": "Correct", "score": 4}]},
+                    "rubric": {
+                        "criteria": [
+                            {"description": "Correct", "score": 2},
+                            {"description": "Detailed", "score": 2},
+                        ]
+                    },
                 }
                 for index in range(2)
             ],
@@ -143,6 +150,8 @@ def test_restart_recovers_only_unfinished_questions_after_closure(setup):
     with pytest.raises(LeaseLostError):
         service.workflow.save_job_grade(abandoned, saved[0].id, 0, "Stale write", [])
     with pytest.raises(LeaseLostError):
+        service.workflow.save_job_evaluation(abandoned, saved[0].id, 0, [])
+    with pytest.raises(LeaseLostError):
         service.workflow.finish_job(abandoned, error="Stale failure")
 
 
@@ -215,7 +224,7 @@ def test_worker_shutdown_releases_owned_job(setup):
             started.set()
             await asyncio.Event().wait()
 
-        llm.grade = slow_grade
+        llm.grade_binary = slow_grade
         task = asyncio.create_task(service.process_pending_job())
         await started.wait()
         task.cancel()
@@ -353,7 +362,7 @@ def test_heartbeat_prevents_reclaim_during_long_llm_request(setup):
     service, store, test, llm = setup
     service.settings.grading_lease_seconds = 3
     attempt = submit(service, test)
-    original_grade = llm.grade
+    original_grade = llm.grade_binary
 
     async def scenario():
         started = asyncio.Event()
@@ -364,7 +373,7 @@ def test_heartbeat_prevents_reclaim_during_long_llm_request(setup):
             await release.wait()
             return await original_grade(**kwargs)
 
-        llm.grade = slow_grade
+        llm.grade_binary = slow_grade
         task = asyncio.create_task(service.process_pending_job())
         try:
             await asyncio.wait_for(started.wait(), timeout=2)
@@ -428,3 +437,93 @@ def test_fewshot_worker_uses_saved_examples_and_persists_grades(setup):
     assert result.attempt.status == "graded"
     assert result.total_score == 6
     assert all(item.criteria_met == [] for item in result.responses)
+
+
+@pytest.mark.parametrize("error_type", [LLMServiceError, LLMResponseError])
+def test_feedback_failure_recovers_saved_labels_and_model_names_without_regrading(
+    setup, error_type
+):
+    service, store, test, llm = setup
+    service.settings.llm_model = "grading-at-submit"
+    service.settings.llm_feedback_model = "feedback-at-submit"
+    attempt = submit(service, test)
+    service.settings.llm_model = "changed-grader"
+    service.settings.llm_feedback_model = "changed-feedback"
+    feedback_calls = []
+
+    async def feedback(**kwargs):
+        feedback_calls.append(kwargs)
+        if "Answer 1" in kwargs["user_prompt"] and len(feedback_calls) == 2:
+            raise error_type("Feedback unavailable")
+        return FeedbackResult(feedback="Met the core idea; add supporting detail.")
+
+    llm.generate_feedback = feedback
+    asyncio.run(service.process_pending_job())
+    assert store.get_attempt(attempt.id).status == (
+        "failed" if error_type is LLMResponseError else "grading"
+    )
+    assert [item.score for item in store.list_responses(attempt.id)] == [2, None]
+    # Simulate a fresh process after the feedback failure, with changed defaults.
+    restarted = GradingService(Settings(), grading_store=store, llm_client=llm)
+    if error_type is LLMResponseError:
+        asyncio.run(restarted.retry_grading(test.id, attempt.id, "student"))
+    asyncio.run(restarted.process_pending_job())
+    result = asyncio.run(restarted.get_attempt_result(test.id, attempt.id, "student"))
+    assert result.attempt.status == "graded"
+    assert result.total_score == 4
+    assert len(llm.calls) == 2
+    assert all(json.loads(call)["model"] == "grading-at-submit" for call in llm.calls)
+    assert len(feedback_calls) == 3
+    assert all(call["model"] == "feedback-at-submit" for call in feedback_calls)
+    assert all(
+        "1. [MET] Correct\n2. [NOT MET] Detailed" in call["user_prompt"]
+        for call in feedback_calls
+    )
+
+
+def test_partial_submission_keeps_both_model_names(setup):
+    service, store, test, llm = setup
+    service.settings.llm_model = "saved-grader"
+    service.settings.llm_feedback_model = "saved-feedback"
+    attempt = asyncio.run(service.create_attempt(test.id, "student"))
+    first = request_for(test, finalize=False)
+    first.responses = first.responses[:1]
+    asyncio.run(service.grade_attempt(test.id, attempt.id, "student", first))
+    asyncio.run(service.process_pending_job())
+    service.settings.llm_model = "new-grader"
+    service.settings.llm_feedback_model = "new-feedback"
+    final = request_for(test)
+    final.responses = final.responses[1:]
+    feedback_models = []
+
+    async def feedback(**kwargs):
+        feedback_models.append(kwargs["model"])
+        return FeedbackResult(feedback="Feedback")
+
+    llm.generate_feedback = feedback
+    asyncio.run(service.grade_attempt(test.id, attempt.id, "student", final))
+    asyncio.run(service.process_pending_job())
+    assert store.get_attempt(attempt.id).status == "graded"
+    assert all(json.loads(call)["model"] == "saved-grader" for call in llm.calls)
+    assert feedback_models == ["saved-feedback"]
+
+
+def test_delete_test_removes_feedback_checkpoints_with_foreign_keys_enabled(setup):
+    from app.db.grading_repository import criteria_evaluations
+
+    service, store, test, _ = setup
+    with store.engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+    submit(service, test)
+    asyncio.run(service.process_pending_job())
+    with store.engine.connect() as connection:
+        assert (
+            connection.scalar(select(func.count()).select_from(criteria_evaluations))
+            == 2
+        )
+    store.delete_test(test.id)
+    with store.engine.connect() as connection:
+        assert (
+            connection.scalar(select(func.count()).select_from(criteria_evaluations))
+            == 0
+        )

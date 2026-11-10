@@ -10,6 +10,7 @@ from app.db import (
     PostgresGradingRepository,
     PostgresUserRepository,
 )
+from app.dto import FeedbackResult
 from app.main import create_app
 from app.service import GradingService, IdentityService, LocalLLMClient
 from app.service.dataset_service import DatasetService
@@ -72,6 +73,10 @@ def llm_client() -> LocalLLMClient:
     client.close = AsyncMock()
     client.health = AsyncMock(return_value=True)
     client.grade = AsyncMock()
+    client.grade_binary = AsyncMock(return_value=[1])
+    client.generate_feedback = AsyncMock(
+        return_value=FeedbackResult(feedback="Feedback")
+    )
     return client
 
 

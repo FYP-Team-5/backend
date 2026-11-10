@@ -9,6 +9,10 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       API_KEY: ${API_KEY:-}
+      TRAINING_CALLBACK_TOKEN: ${TRAINING_CALLBACK_TOKEN:-}
+      TRAINING_HF_REPO: ${TRAINING_HF_REPO:-SmuFypTeam5/GradingQlora}
+      TRAINING_ADAPTER_DIRECTORY: /mnt/llm-data/adapters
+      TRAINING_MAX_LORA_RANK: ${TRAINING_MAX_LORA_RANK:-64}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-change-me}@backend-postgres:5432/${POSTGRES_DB:-user}
       JWT_SECRET: ${JWT_SECRET:-development-only-change-me-at-least-32-bytes}
@@ -19,6 +23,8 @@ services:
       SEED_DEMO_USERS: ${SEED_DEMO_USERS:-true}
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434/v1/chat/completions}
       LLM_MODEL: ${LLM_MODEL:-local-model}
+      LLM_GRADING_CONTRACT: ${LLM_GRADING_CONTRACT:-criteria_array_v1}
+      LLM_FEEDBACK_MODEL: ${LLM_FEEDBACK_MODEL:-qwen35-9b-feedback-qlora}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}
@@ -39,6 +45,8 @@ services:
       DATASET_LEASE_SECONDS: ${DATASET_LEASE_SECONDS:-120}
       DATASET_MAX_RETRIES: ${DATASET_MAX_RETRIES:-3}
       DATASET_RETRY_SECONDS: ${DATASET_RETRY_SECONDS:-5}
+    volumes:
+      - ${MODEL_ADAPTER_DIRECTORY:-/mnt/llm-data/adapters}:/mnt/llm-data/adapters
     ports:
       - "${API_PORT:-8002}:8002"
     extra_hosts:

@@ -17,6 +17,7 @@ from app.db.grading_workflow import GradingWorkflowRepository, LeaseLostError
 from app.dto import (
     AttemptGradeResponse,
     CourseCreate,
+    CriteriaGradingResult,
     FewShotGradingResult,
     GradeAttemptRequest,
     RubricCreate,
@@ -34,11 +35,20 @@ from app.service.llm_client import LLMResponseError, LLMServiceError, LocalLLMCl
 
 SYSTEM_PROMPT_RUBRIC = """You are a strict grading assistant.
 Evaluate whether the student answer fulfills each grading criterion independently.
-Return ONLY a valid JSON object with numeric score, string feedback, and a
-criteria_met array containing one object per criterion. Each criteria_met object
+Return ONLY a valid JSON object with a criteria_met array containing one object
+per criterion. Each criteria_met object
 must contain the criterion's id as criteria_id and a boolean is_met. Do not
-include explanations or markdown outside the JSON object.
+generate a score or feedback. Do not include explanations or markdown outside
+the JSON object.
 """
+
+# Match feedback/qlora_feedback_qwen3.5-9B.ipynb's student training prompt.
+SYSTEM_PROMPT_FEEDBACK = (
+    "You are a computer science tutor. Write concise, specific, encouraging feedback to the student on their short answer. "
+    "The marker's decision for each key point is given; help the student understand it. "
+    "Acknowledge what is correct, explain anything missing or incorrect, help the student improve, "
+    "and never mention marks, key points or the reference answer."
+)
 
 SYSTEM_PROMPT_FEWSHOT = """You are a strict grading assistant.
 Compare the student answer holistically against the example answers provided,
@@ -100,6 +110,7 @@ class GradingService:
             max_tokens=settings.llm_max_tokens,
         )
         self.workflow = GradingWorkflowRepository(self.grading_store)
+        self.model_registry = None
         self._worker_task: asyncio.Task | None = None
         self._wake = asyncio.Event()
 
@@ -307,12 +318,23 @@ class GradingService:
             submission.answer = submission.answer.strip()
             if len(submission.answer) > self.settings.max_answer_characters:
                 raise StudentAnswerTooLargeError("Answer exceeds the character limit.")
+        model_config = (
+            await asyncio.to_thread(self.model_registry.active_config)
+            if self.model_registry
+            else None
+        ) or {
+            "name": self.settings.llm_model,
+            "contract": self.settings.llm_grading_contract,
+            "fewshot_name": self.settings.llm_model,
+            "feedback_name": self.settings.llm_feedback_model,
+        }
         accepted = await asyncio.to_thread(
             self.workflow.accept_submission,
             test,
             attempt_id,
             user_id,
             normalized,
+            model_config,
         )
         self._wake.set()
         return accepted
@@ -402,11 +424,13 @@ class GradingService:
 
     async def _process_job(self, job: dict) -> None:
         test = Test.model_validate(job["snapshot"])
+        model_config = job["snapshot"].get("_grading_model", {})
         questions_by_id = {question.id: question for question in test.questions}
         saved = await asyncio.to_thread(
             self.grading_store.list_responses, job["attempt_id"]
         )
         requested_ids = {item["question_id"] for item in job["request"]["responses"]}
+        evaluations = await asyncio.to_thread(self.workflow.job_evaluations, job)
         errors: list[str] = []
         permanent_failure = False
         for response in saved:
@@ -420,25 +444,53 @@ class GradingService:
             try:
                 method = self._resolve_grading_method(question)
                 if method == "rubric":
-                    result = await self.llm.grade(
-                        system_prompt=SYSTEM_PROMPT_RUBRIC,
-                        user_prompt=self._grading_prompt(question, response.answer),
+                    feedback_model = model_config.get(
+                        "feedback_name", self.settings.llm_feedback_model
                     )
-                    known_ids = {item.id for item in question.rubric.criteria}
-                    unknown = {
-                        item.criteria_id for item in result.criteria_met
-                    } - known_ids
-                    if unknown:
-                        raise LLMCriteriaMismatchError(
-                            f"LLM returned unknown criteria id(s): {sorted(unknown)}."
+                    if feedback_model == model_config.get(
+                        "name", self.settings.llm_model
+                    ):
+                        raise ValueError(
+                            "Grading and feedback must use different models."
                         )
-                    criteria_results = [
-                        item.model_dump() for item in result.criteria_met
-                    ]
+                    evaluation = evaluations.get(response.id)
+                    if evaluation is None:
+                        evaluation = await self._evaluate_criteria(
+                            question, response.answer, model_config
+                        )
+                        await asyncio.to_thread(
+                            self.workflow.save_job_evaluation,
+                            job,
+                            response.id,
+                            evaluation["score"],
+                            evaluation["criteria_results"],
+                        )
+                    criteria_results = evaluation["criteria_results"]
+                    feedback = await self.llm.generate_feedback(
+                        system_prompt=SYSTEM_PROMPT_FEEDBACK,
+                        user_prompt=self._feedback_prompt(
+                            question, response.answer, evaluation
+                        ),
+                        model=feedback_model,
+                    )
+                    result = CriteriaGradingResult(
+                        score=evaluation["score"],
+                        feedback=feedback.feedback,
+                        criteria_met=criteria_results,
+                    )
                 else:
+                    fewshot_model = model_config.get(
+                        "fewshot_name", self.settings.llm_model
+                    )
+                    overrides = (
+                        {"model": fewshot_model}
+                        if fewshot_model != self.settings.llm_model
+                        else {}
+                    )
                     result = await self.llm.grade_fewshot(
                         system_prompt=SYSTEM_PROMPT_FEWSHOT,
                         user_prompt=self._fewshot_prompt(question, response.answer),
+                        **overrides,
                     )
                     criteria_results = []
                 self._validate_score_scale(result.score, question)
@@ -484,6 +536,75 @@ class GradingService:
             else None
         )
         await asyncio.to_thread(self.workflow.finish_job, job, error=error)
+
+    async def _evaluate_criteria(
+        self, question: Question, answer: str, model_config: dict
+    ) -> dict:
+        if self.model_registry:
+            await self.model_registry.ensure_model(model_config)
+        criteria = question.rubric.criteria
+        model = model_config.get("name", self.settings.llm_model)
+        # Jobs accepted before model snapshots used the JSON-object contract.
+        if model_config.get("contract", "grading_json_v1") == "criteria_array_v1":
+            labels = await self.llm.grade_binary(
+                question=question.prompt,
+                desired_answer=question.model_answer or "",
+                student_answer=answer,
+                criteria=[item.description for item in criteria],
+                model=model,
+            )
+            criteria_results = [
+                {"criteria_id": item.id, "is_met": bool(label)}
+                for item, label in zip(criteria, labels, strict=True)
+            ]
+        else:
+            result = await self.llm.grade_criteria(
+                system_prompt=SYSTEM_PROMPT_RUBRIC,
+                user_prompt=self._grading_prompt(question, answer),
+                model=model,
+            )
+            ids = [item.criteria_id for item in result.criteria_met]
+            if len(ids) != len(set(ids)) or set(ids) != {item.id for item in criteria}:
+                raise LLMCriteriaMismatchError(
+                    "Grading model must return exactly one decision for each rubric criterion."
+                )
+            decisions = {item.criteria_id: item.is_met for item in result.criteria_met}
+            criteria_results = [
+                {"criteria_id": item.id, "is_met": decisions[item.id]}
+                for item in criteria
+            ]
+        score = sum(
+            item.score
+            for item, decision in zip(criteria, criteria_results, strict=True)
+            if decision["is_met"]
+        )
+        self._validate_score_scale(score, question)
+        return {"score": score, "criteria_results": criteria_results}
+
+    @staticmethod
+    def _feedback_prompt(question: Question, answer: str, evaluation: dict) -> str:
+        decisions = {
+            item["criteria_id"]: item["is_met"]
+            for item in evaluation["criteria_results"]
+        }
+
+        def normalize(value: str) -> str:
+            return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+        criteria = question.rubric.criteria
+        key_points = [
+            f"{number}. {'[MET]' if decisions[item.id] else '[NOT MET]'} {item.description}"
+            for number, item in enumerate(criteria, start=1)
+        ]
+        return "\n\n".join(
+            [
+                f"Question:\n{normalize(question.prompt)}",
+                f"Reference answer:\n{normalize(question.model_answer or '')}",
+                f"Student answer:\n{normalize(answer) or '(no answer given)'}",
+                "Key points:\n" + "\n".join(key_points),
+                f"Key points met: {sum(decisions.values())} of {len(criteria)}",
+            ]
+        )
 
     async def set_deadline(self, test_id: str, ends_at: datetime) -> Test:
         return await asyncio.to_thread(self.workflow.set_deadline, test_id, ends_at)
@@ -648,7 +769,7 @@ class GradingService:
 {answer}
 </student_answer>
 
-Evaluate every criterion and use max_score={question.max_score}. Return JSON only."""
+Evaluate every criterion. Return only criteria_met as JSON."""
 
     @staticmethod
     def _fewshot_prompt(question: Question, answer: str) -> str:

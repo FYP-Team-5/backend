@@ -13,6 +13,7 @@ from app.db.grading_repository import (
     GradingConflictError,
     GradingRecordNotFoundError,
     attempts,
+    criteria_evaluations,
     criteria_met,
     ensure_open,
     grade_changes,
@@ -77,7 +78,9 @@ class GradingWorkflowRepository:
                 )
             if ends_at <= datetime.now(UTC):
                 raise GradingConflictError("End date must be in the future.")
-            if row["starts_at"] is not None and ends_at <= utc_datetime(row["starts_at"]):
+            if row["starts_at"] is not None and ends_at <= utc_datetime(
+                row["starts_at"]
+            ):
                 raise GradingConflictError("End date must be after the start date.")
             connection.execute(
                 update(tests).where(tests.c.id == test_id).values(ends_at=ends_at)
@@ -99,7 +102,12 @@ class GradingWorkflowRepository:
         return self.store.get_test(test_id)
 
     def accept_submission(
-        self, test: Test, attempt_id: str, user_id: str, request: GradeAttemptRequest
+        self,
+        test: Test,
+        attempt_id: str,
+        user_id: str,
+        request: GradeAttemptRequest,
+        model_config: dict | None = None,
     ) -> Attempt:
         payload = request.model_dump(mode="json")
         payload["responses"] = sorted(
@@ -170,6 +178,8 @@ class GradingWorkflowRepository:
                 if previous is not None
                 else test.model_dump(mode="json")
             )
+            if previous is None and model_config:
+                snapshot["_grading_model"] = model_config
             connection.execute(
                 insert(grading_jobs).values(
                     id=str(uuid.uuid4()),
@@ -320,6 +330,45 @@ class GradingWorkflowRepository:
         ):
             raise LeaseLostError("Grading job ownership changed.")
         return attempt
+
+    def job_evaluations(self, job: dict) -> dict[str, dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(criteria_evaluations)
+                .join(responses, responses.c.id == criteria_evaluations.c.response_id)
+                .where(responses.c.attempt_id == job["attempt_id"])
+            ).mappings()
+            return {row["response_id"]: dict(row) for row in rows}
+
+    def save_job_evaluation(
+        self, job: dict, response_id: str, score: float, criteria_results: list[dict]
+    ) -> None:
+        # Commit criterion decisions before feedback so recovery never regrades them.
+        with self.engine.begin() as connection:
+            self._owned_job(connection, job)
+            response = connection.execute(
+                select(responses.c.id).where(
+                    responses.c.id == response_id,
+                    responses.c.attempt_id == job["attempt_id"],
+                    responses.c.score.is_(None),
+                    responses.c.overridden.is_(False),
+                )
+            ).first()
+            if response is None:
+                raise LeaseLostError("Response is no longer awaiting grading.")
+            existing = connection.execute(
+                select(criteria_evaluations.c.response_id).where(
+                    criteria_evaluations.c.response_id == response_id
+                )
+            ).first()
+            if existing is None:
+                connection.execute(
+                    insert(criteria_evaluations).values(
+                        response_id=response_id,
+                        score=score,
+                        criteria_results=criteria_results,
+                    )
+                )
 
     def save_job_grade(
         self,

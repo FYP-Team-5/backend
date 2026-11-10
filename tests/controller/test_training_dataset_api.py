@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from app.dto import CriteriaGradingResult
 from tests.controller.test_submission_workflow import (
     make_test,
     student,
@@ -149,8 +148,8 @@ def test_upload_validation_size_limit_and_idempotency_conflict(
 def test_criterion_corrections_enable_automatic_export_after_closure(
     client, instructor_headers, llm_client
 ):
-    # The model provided no per-criterion labels; the instructor can supply them.
-    llm_client.grade.return_value = CriteriaGradingResult(score=2, feedback="Feedback")
+    # An instructor can correct the model's criterion decision before export.
+    llm_client.grade_binary.return_value = [0]
     headers, _ = student(client, 1)
     test = make_test(client, instructor_headers)
     attempt_id = submit(client, test, headers)
