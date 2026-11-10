@@ -11,7 +11,7 @@ from app.db import AttemptStateError, PostgresGradingRepository
 from app.dto import (
     CourseCreate,
     CriteriaCreate,
-    CriteriaGradingResult,
+    CriteriaEvaluationResult,
     CriteriaMetResult,
     FeedbackResult,
     GradeAttemptRequest,
@@ -27,13 +27,11 @@ from app.service import (
 )
 
 CRITERION_ID_PATTERN = re.compile(r'<criterion id="([^"]+)"')
-MAX_SCORE_PATTERN = re.compile(r'max_score="([\d.]+)"')
 
 
 class FakeLLMClient:
-    def __init__(self, *, wrong_scale: bool = False) -> None:
+    def __init__(self) -> None:
         self.calls = []
-        self.wrong_scale = wrong_scale
 
     async def close(self) -> None:
         pass
@@ -41,14 +39,10 @@ class FakeLLMClient:
     async def health(self) -> bool:
         return True
 
-    async def grade_criteria(self, **kwargs) -> CriteriaGradingResult:
+    async def grade_criteria(self, **kwargs) -> CriteriaEvaluationResult:
         self.calls.append(kwargs)
         criteria_ids = CRITERION_ID_PATTERN.findall(kwargs["user_prompt"])
-        max_score = float(MAX_SCORE_PATTERN.search(kwargs["user_prompt"]).group(1))
-        score = max_score * 100 if self.wrong_scale else max_score * 0.8
-        return CriteriaGradingResult(
-            score=score,
-            feedback="Relevant answer with room for more evidence.",
+        return CriteriaEvaluationResult(
             criteria_met=[
                 CriteriaMetResult(criteria_id=criteria_id, is_met=index == 0)
                 for index, criteria_id in enumerate(criteria_ids)
@@ -81,9 +75,9 @@ async def submit_and_wait(service, test_id, attempt_id, user_id, request):
     return await service.get_attempt_result(test_id, attempt_id, user_id)
 
 
-def make_service(*, wrong_scale: bool = False):
+def make_service():
     grading_store = make_grading_store()
-    llm = FakeLLMClient(wrong_scale=wrong_scale)
+    llm = FakeLLMClient()
     service = GradingService(Settings(), grading_store=grading_store, llm_client=llm)
     course = asyncio.run(
         service.create_course(
@@ -389,8 +383,8 @@ def test_upload_criteria_csv_rejects_unknown_question_id() -> None:
         asyncio.run(service.upload_criteria_csv(test.id, criteria_csv))
 
 
-def test_grading_model_cannot_change_score_or_supply_feedback() -> None:
-    service, grading_store, _, test = make_service(wrong_scale=True)
+def test_backend_composes_score_and_feedback_from_criterion_decisions() -> None:
+    service, grading_store, _, test = make_service()
     service.settings.llm_grading_contract = "grading_json_v1"
     question1 = test.questions[0]
     attempt = asyncio.run(service.create_attempt(test.id, "student-1"))
@@ -552,16 +546,15 @@ def test_binary_grader_then_feedback_model_preserves_api_and_backend_score():
 
 @pytest.mark.parametrize("decisions", [[], ["duplicate", "duplicate"], ["unknown"]])
 def test_legacy_json_criteria_must_be_complete_and_unique(decisions):
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     service, _, llm, test = make_service()
     service.settings.llm_grading_contract = "grading_json_v1"
     llm.grade_criteria = AsyncMock(
-        return_value=CriteriaGradingResult(
-            score=10,
-            feedback="Ignored",
+        return_value=SimpleNamespace(
             criteria_met=[
-                {"criteria_id": value, "is_met": True} for value in decisions
+                CriteriaMetResult(criteria_id=value, is_met=True) for value in decisions
             ],
         )
     )
@@ -604,3 +597,79 @@ def test_job_from_before_model_snapshots_still_uses_json_criterion_contract():
     response = store.list_responses(attempt.id)[0]
     assert response.score == 8
     assert response.feedback == "Separate feedback model response."
+
+
+def test_retry_saved_job_accepts_criteria_only_json_and_preserves_completed_grades():
+    import json
+
+    import httpx
+
+    from app.service.llm_client import LocalLLMClient
+
+    service, store, _, test = make_service()
+    service.settings.llm_model = "grader"
+    service.settings.llm_feedback_model = "feedback"
+    first, second = test.questions
+    attempt = asyncio.run(service.create_attempt(test.id, "student"))
+    service.workflow.accept_submission(
+        test,
+        attempt.id,
+        "student",
+        GradeAttemptRequest(
+            responses=[
+                {"question_id": first.id, "answer": "Already graded answer"},
+                {"question_id": second.id, "answer": "Saved ungraded answer"},
+            ],
+        ),
+    )
+    job = service.workflow.claim_job(60, 3)
+    first_response = store.list_responses(attempt.id)[0]
+    service.workflow.save_job_grade(job, first_response.id, 8, "Saved feedback", [])
+    service.workflow.finish_job(job, error="Old parser required score and feedback")
+    calls = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["model"] == "grader":
+            assert "Saved ungraded answer" in body["messages"][1]["content"]
+            content = json.dumps(
+                {
+                    "criteria_met": [
+                        {"criteria_id": criterion.id, "is_met": False}
+                        for criterion in second.rubric.criteria
+                    ]
+                }
+            )
+        else:
+            assert body["model"] == "feedback"
+            assert "[NOT MET] Accuracy" in body["messages"][1]["content"]
+            content = "Explain the idea accurately and include evidence."
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        ) as transport:
+            service.llm = LocalLLMClient(
+                url="http://llm.test/v1/chat/completions",
+                model="grader",
+                client=transport,
+            )
+            await service.retry_grading(test.id, attempt.id, "student")
+            await service.process_pending_job()
+            return await service.get_attempt_result(test.id, attempt.id, "student")
+
+    result = asyncio.run(exercise())
+    assert result.attempt.status == "graded"
+    assert result.total_score == 8
+    assert result.responses[0].score == 8
+    assert result.responses[0].feedback == "Saved feedback"
+    assert result.responses[1].score == 0
+    assert (
+        result.responses[1].feedback
+        == "Explain the idea accurately and include evidence."
+    )
+    assert [call["model"] for call in calls] == ["grader", "feedback"]

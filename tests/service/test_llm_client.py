@@ -7,7 +7,8 @@ import pytest
 from app.service import LLMResponseError, LocalLLMClient
 
 
-def test_grade_uses_openai_contract_and_parses_structured_result() -> None:
+@pytest.mark.parametrize("method", ["grade", "grade_criteria"])
+def test_rubric_grading_requires_only_criterion_decisions(method) -> None:
     async def exercise() -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
@@ -22,8 +23,6 @@ def test_grade_uses_openai_contract_and_parses_structured_result() -> None:
                             "message": {
                                 "content": json.dumps(
                                     {
-                                        "score": 4,
-                                        "feedback": "Good work.",
                                         "criteria_met": [
                                             {"criteria_id": "c1", "is_met": True}
                                         ],
@@ -42,13 +41,56 @@ def test_grade_uses_openai_contract_and_parses_structured_result() -> None:
             client=http_client,
         )
 
-        result = await client.grade(system_prompt="system", user_prompt="user")
+        result = await getattr(client, method)(
+            system_prompt="system", user_prompt="user"
+        )
 
-        assert result.score == 4
-        assert result.feedback == "Good work."
+        assert not hasattr(result, "score")
+        assert not hasattr(result, "feedback")
         assert result.criteria_met[0].criteria_id == "c1"
         assert result.criteria_met[0].is_met is True
         await http_client.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_legacy_grading_score_and_feedback_are_ignored():
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "score": 999,
+                                            "feedback": "Ignored grading-model feedback",
+                                            "criteria_met": [
+                                                {"criteria_id": "c1", "is_met": False}
+                                            ],
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                )
+            )
+        ) as transport:
+            client = LocalLLMClient(
+                url="http://llm.test/v1/chat/completions",
+                model="grading",
+                client=transport,
+            )
+            result = await client.grade(
+                system_prompt="Criteria only", user_prompt="Answer"
+            )
+            assert result.model_dump() == {
+                "criteria_met": [{"criteria_id": "c1", "is_met": False}]
+            }
 
     asyncio.run(exercise())
 

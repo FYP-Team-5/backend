@@ -4,8 +4,9 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 from app.model.assessment import Attempt, CriterionScore, Question, Response
+from app.model.identifiers import CROSS_SERVICE_ID_PATTERN
 
-ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+ID_PATTERN = CROSS_SERVICE_ID_PATTERN
 
 
 def future_deadline(value: datetime) -> datetime:
@@ -21,7 +22,7 @@ class CourseCreate(BaseModel):
 
 class CriteriaCreate(BaseModel):
     description: str = Field(min_length=1, max_length=500)
-    score: float = Field(gt=0)
+    score: float = Field(gt=0, allow_inf_nan=False)
 
 
 class RubricCreate(BaseModel):
@@ -32,7 +33,7 @@ class RubricCreate(BaseModel):
 class ExampleCreate(BaseModel):
     band: Literal["excellent", "average", "poor"]
     example_answer: str = Field(min_length=1, max_length=10_000)
-    score: float = Field(ge=0)
+    score: float = Field(ge=0, allow_inf_nan=False)
 
 
 class GradingMethodUpdate(BaseModel):
@@ -42,8 +43,8 @@ class GradingMethodUpdate(BaseModel):
 class QuestionCreate(BaseModel):
     external_id: str | None = Field(default=None, pattern=ID_PATTERN)
     prompt: str = Field(min_length=1, max_length=10_000)
-    max_score: float = Field(gt=0)
-    score_increment: float = Field(gt=0)
+    max_score: float = Field(gt=0, allow_inf_nan=False)
+    score_increment: float = Field(gt=0, allow_inf_nan=False)
     model_answer: str | None = Field(default=None, max_length=10_000)
     rubric: RubricCreate | None = None
 
@@ -129,9 +130,9 @@ class FewShotGradeRequest(BaseModel):
 class AttemptGradeResponse(BaseModel):
     attempt: Attempt
     responses: list[Response]
-    total_score: float = Field(ge=0)
-    max_score: float = Field(gt=0)
-    percentage: float = Field(ge=0, le=100)
+    total_score: float = Field(ge=0, allow_inf_nan=False)
+    max_score: float = Field(gt=0, allow_inf_nan=False)
+    percentage: float = Field(ge=0, le=100, allow_inf_nan=False)
     completed_questions: int = Field(ge=0)
     total_questions: int = Field(ge=1)
     questions: list[Question] = Field(default_factory=list)
@@ -144,5 +145,5 @@ class StudentSubmissionSummary(BaseModel):
     student_number: str
     latest_submission: Attempt | None = None
     latest_graded_submission: Attempt | None = None
-    total_score: float | None = None
-    max_score: float
+    total_score: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_score: float = Field(gt=0, allow_inf_nan=False)

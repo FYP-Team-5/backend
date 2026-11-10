@@ -8,4 +8,5 @@ class HealthResponse(BaseModel):
     postgres: Literal["ok"]
     llm: Literal["ok"]
     model: str
+    feedback_model: str
     seaweedfs: Literal["ok", "unavailable", "unknown"] = "unknown"

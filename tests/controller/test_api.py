@@ -23,12 +23,13 @@ def _login(client: TestClient, email: str, password: str) -> str:
     return response.json()["access_token"]
 
 
-def test_health_and_openapi(client: TestClient) -> None:
+def test_health_and_openapi(client: TestClient, settings) -> None:
     response = client.get("/health")
     health = response.json()
     assert health["status"] == "ok"
     assert health["postgres"] == "ok"
     assert health["llm"] == "ok"
+    assert health["feedback_model"] == settings.llm_feedback_model
 
     schema = client.get("/openapi.json").json()
     assert "/api/v1/auth/login" in schema["paths"]

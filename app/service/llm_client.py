@@ -7,8 +7,8 @@ import httpx
 from pydantic import ValidationError
 
 from app.dto import (
+    BinaryCriteriaResult,
     CriteriaEvaluationResult,
-    CriteriaGradingResult,
     FeedbackResult,
     FewShotGradingResult,
 )
@@ -114,19 +114,6 @@ class LocalLLMClient:
 
     async def grade(
         self, *, system_prompt: str, user_prompt: str, model: str | None = None
-    ) -> CriteriaGradingResult:
-        content = await self._request_content(
-            system_prompt=system_prompt, user_prompt=user_prompt, model=model
-        )
-        try:
-            return CriteriaGradingResult.model_validate_json(content)
-        except ValidationError as exc:
-            raise LLMResponseError(
-                f"LLM returned an invalid grading result: {exc}"
-            ) from exc
-
-    async def grade_criteria(
-        self, *, system_prompt: str, user_prompt: str, model: str | None = None
     ) -> CriteriaEvaluationResult:
         content = await self._request_content(
             system_prompt=system_prompt, user_prompt=user_prompt, model=model
@@ -135,8 +122,17 @@ class LocalLLMClient:
             return CriteriaEvaluationResult.model_validate_json(content)
         except ValidationError as exc:
             raise LLMResponseError(
-                f"LLM returned invalid criterion decisions: {exc}"
+                f"LLM returned an invalid grading result: {exc}"
             ) from exc
+
+    async def grade_criteria(
+        self, *, system_prompt: str, user_prompt: str, model: str | None = None
+    ) -> CriteriaEvaluationResult:
+        # Keep the explicit name while routing all rubric calls through the same
+        # criterion-only parser, including callers of the original grade method.
+        return await self.grade(
+            system_prompt=system_prompt, user_prompt=user_prompt, model=model
+        )
 
     async def generate_feedback(
         self, *, system_prompt: str, user_prompt: str, model: str
@@ -171,8 +167,6 @@ class LocalLLMClient:
         criteria: list[str],
         model: str | None = None,
     ) -> list[int]:
-        import json
-
         system = (
             "You are a strict grading assistant.\n\n"
             "Your task is to evaluate whether a student's answer fulfills each grading criterion.\n\n"
@@ -193,16 +187,12 @@ class LocalLLMClient:
             user_prompt=f"Question:\n{question}\n\nDesired answer:\n{desired_answer}\n\nStudent answer:\n{student_answer}\n\nCriteria:\n{descriptions}",
         )
         try:
-            scores = json.loads(content)
-        except ValueError:
+            scores = BinaryCriteriaResult.model_validate_json(content).root
+        except ValidationError:
             raise LLMResponseError(
-                "Candidate returned an invalid rubric array"
+                "Grading model must return a nonempty JSON array of integer 0/1 labels"
             ) from None
-        if (
-            not isinstance(scores, list)
-            or len(scores) != len(criteria)
-            or any(type(x) is not int or x not in (0, 1) for x in scores)
-        ):
+        if len(scores) != len(criteria):
             raise LLMResponseError(
                 "Candidate rubric labels must be aligned binary integers"
             )

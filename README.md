@@ -165,6 +165,23 @@ criterion-id/boolean `criteria_met` records, are unchanged.
 The default `LLM_GRADING_CONTRACT=criteria_array_v1` matches the grading LoRA.
 `grading_json_v1` remains available for older models/jobs; it requires exactly one
 decision per criterion and uses only those decisions to calculate the score.
+
+The DTOs distinguish each stage explicitly:
+
+| Schema | Purpose |
+| --- | --- |
+| `BinaryCriteriaResult` | Strict, nonempty integer 0/1 array from the grading LoRA |
+| `CriteriaEvaluationResult` | Criterion-only JSON object for the legacy grading contract |
+| `FeedbackResult` | Internal wrapper for plain-text feedback from the feedback model |
+| `CriteriaGradingResult` | Backend-assembled score, feedback and criterion decisions; never a grading-model parser |
+| `FewShotGradingResult` | Existing holistic few-shot JSON score/feedback result |
+
+`GradingOutputContract` is shared by settings and training callbacks. Callback,
+model-review and deployment schemas live in `app/dto/training.py` and appear in
+OpenAPI. Historical grading snapshots and API criterion-id/boolean records retain
+their existing shapes. Numeric assessment and grading scores must be finite so
+invalid Infinity/NaN values cannot enter JSON responses or persisted grades.
+
 Few-shot grading retains its existing JSON score/feedback contract and model.
 Both models must be available on `LLM_URL`; their aliases must differ. The
 deployment serving wrapper loads the grading and feedback adapters into the same

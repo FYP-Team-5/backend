@@ -34,5 +34,6 @@ async def health(
         postgres="ok",
         llm="ok",
         model=grading_service.settings.llm_model,
+        feedback_model=grading_service.settings.llm_feedback_model,
         seaweedfs=request.app.state.dataset_service.storage_status,
     )

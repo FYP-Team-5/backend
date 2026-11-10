@@ -1,8 +1,9 @@
 from functools import lru_cache
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.dto.grading import GradingOutputContract
 
 
 class Settings(BaseSettings):
@@ -30,9 +31,7 @@ class Settings(BaseSettings):
 
     llm_url: str = "http://localhost:11434/v1/chat/completions"
     llm_model: str = "local-model"
-    llm_grading_contract: Literal["criteria_array_v1", "grading_json_v1"] = (
-        "criteria_array_v1"
-    )
+    llm_grading_contract: GradingOutputContract = "criteria_array_v1"
     llm_feedback_model: str = Field(default="qwen35-9b-feedback-qlora", min_length=1)
     llm_api_key: str | None = None
     llm_timeout_seconds: float = Field(default=120, gt=0, le=600)

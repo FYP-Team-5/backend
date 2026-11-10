@@ -16,13 +16,22 @@ from app.dto.assessment import (
 )
 from app.dto.auth import TokenClaims
 from app.dto.grading import (
+    BinaryCriteriaResult,
     CriteriaEvaluationResult,
     CriteriaGradingResult,
     CriteriaMetResult,
     FeedbackResult,
     FewShotGradingResult,
+    GradingOutputContract,
 )
 from app.dto.health import HealthResponse
+from app.dto.training import (
+    Candidate,
+    DeployRequest,
+    TrainingDeploymentResponse,
+    TrainingRegistrationResponse,
+    TrainingRunResponse,
+)
 from app.dto.user import (
     LoginRequest,
     StaffRegistration,
@@ -34,17 +43,21 @@ from app.dto.user import (
 
 __all__ = [
     "AttemptGradeResponse",
+    "BinaryCriteriaResult",
+    "Candidate",
     "CourseCreate",
     "CriteriaCreate",
     "CriteriaEvaluationResult",
     "CriteriaGradingResult",
     "CriteriaMetResult",
+    "DeployRequest",
     "ExampleCreate",
     "FeedbackResult",
     "FewShotGradeRequest",
     "FewShotGradingResult",
     "GradeAttemptRequest",
     "GradingMethodUpdate",
+    "GradingOutputContract",
     "HealthResponse",
     "LoginRequest",
     "QuestionCreate",
@@ -58,6 +71,9 @@ __all__ = [
     "TestDeadlineUpdate",
     "TokenClaims",
     "TokenResponse",
+    "TrainingDeploymentResponse",
+    "TrainingRegistrationResponse",
+    "TrainingRunResponse",
     "UserResponse",
     "UserStatusUpdate",
 ]

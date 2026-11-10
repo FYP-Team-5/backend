@@ -21,7 +21,7 @@ class Criteria(BaseModel):
     id: str
     rubric_id: str
     description: str
-    score: float = Field(gt=0)
+    score: float = Field(gt=0, allow_inf_nan=False)
 
 
 class Rubric(BaseModel):
@@ -34,7 +34,7 @@ class Example(BaseModel):
     question_id: str
     band: Literal["excellent", "average", "poor"]
     example_answer: str
-    score: float = Field(ge=0)
+    score: float = Field(ge=0, allow_inf_nan=False)
 
 
 class Question(BaseModel):
@@ -42,8 +42,8 @@ class Question(BaseModel):
     test_id: str
     external_id: str | None = None
     prompt: str
-    max_score: float = Field(gt=0)
-    score_increment: float = Field(gt=0)
+    max_score: float = Field(gt=0, allow_inf_nan=False)
+    score_increment: float = Field(gt=0, allow_inf_nan=False)
     model_answer: str | None = None
     rubric: Rubric | None = None
     examples: list[Example] = Field(default_factory=list)
@@ -111,11 +111,11 @@ class Response(BaseModel):
     attempt_id: str
     question_id: str
     answer: str
-    score: float | None = Field(default=None, ge=0)
+    score: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     feedback: str | None = None
     criteria_met: list[CriteriaMet]
     criterion_scores: list[CriterionScore] | None = None
-    original_score: float | None = None
+    original_score: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     original_feedback: str | None = None
     overridden: bool = False
     edited_by: str | None = None

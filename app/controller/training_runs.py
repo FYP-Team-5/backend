@@ -5,12 +5,18 @@ import secrets
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from app.controller.dependencies import require_api_key, require_instructor
 from app.db import GradingConflictError, GradingRecordNotFoundError
 from app.dto import UserResponse
-from app.service.model_registry import Candidate
+from app.dto.training import (
+    Candidate,
+    DeployRequest,
+    TrainingDeploymentResponse,
+    TrainingRegistrationResponse,
+    TrainingRunResponse,
+)
 
 router = APIRouter(tags=["trained models"])
 
@@ -25,7 +31,18 @@ async def require_training_callback(
         raise HTTPException(401, "Invalid training callback credential")
 
 
-@router.post("/training-runs", dependencies=[Depends(require_training_callback)])
+@router.post(
+    "/training-runs",
+    dependencies=[Depends(require_training_callback)],
+    response_model=TrainingRegistrationResponse,
+    # Retain the bounded streaming parser while publishing its actual body schema.
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": Candidate.model_json_schema()}},
+        }
+    },
+)
 async def register(request: Request):
     payload = bytearray()
     async for chunk in request.stream():
@@ -50,19 +67,17 @@ async def register(request: Request):
 @router.get(
     "/training-runs",
     dependencies=[Depends(require_api_key), Depends(require_instructor)],
+    response_model=list[TrainingRunResponse],
 )
 async def list_runs(request: Request):
     return await asyncio.to_thread(request.app.state.model_registry.list_runs)
-
-
-class DeployRequest(BaseModel):
-    revision: int = Field(ge=0)
 
 
 @router.post(
     "/training-runs/{run_id}/deploy",
     status_code=202,
     dependencies=[Depends(require_api_key)],
+    response_model=TrainingDeploymentResponse,
 )
 async def deploy(
     run_id: str,

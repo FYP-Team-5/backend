@@ -86,7 +86,30 @@ def test_registration_replay_and_conflict(client, settings, instructor_headers):
     rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
     assert len(rows) == 1 and rows[0]["hf_revision"] == "c" * 40
     assert rows[0]["status"] == "candidate" and not rows[0]["is_active"]
+    assert rows[0]["requested_by"] is None
     assert "token" not in rows[0]
+
+
+def test_training_api_openapi_describes_current_request_and_response_contracts(client):
+    schema = client.get("/openapi.json").json()
+    routes = schema["paths"]
+    callback = routes["/api/v1/training-runs"]["post"]
+    request = callback["requestBody"]["content"]["application/json"]["schema"]
+    assert "output_contract" in request["required"]
+    assert request["properties"]["output_contract"]["enum"] == [
+        "criteria_array_v1",
+        "grading_json_v1",
+    ]
+    response = routes["/api/v1/training-runs"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert response["items"]["$ref"].endswith("/TrainingRunResponse")
+    detail = schema["components"]["schemas"]["TrainingRunResponse"]
+    assert "requested_by" in detail["properties"]
+    deployment = routes["/api/v1/training-runs/{run_id}/deploy"]["post"]["responses"][
+        "202"
+    ]["content"]["application/json"]["schema"]
+    assert deployment["$ref"].endswith("/TrainingDeploymentResponse")
 
 
 @pytest.mark.parametrize(

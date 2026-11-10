@@ -8,6 +8,7 @@ from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBea
 from app.dto import (
     UserResponse,
 )
+from app.model.identifiers import CROSS_SERVICE_ID_PATTERN
 from app.service import (
     AttemptService,
     AuthenticationError,
@@ -39,7 +40,7 @@ def get_attempt_service(request: Request) -> AttemptService:
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
-ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+ID_PATTERN = re.compile(CROSS_SERVICE_ID_PATTERN)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def current_user(

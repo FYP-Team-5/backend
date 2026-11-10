@@ -3,15 +3,12 @@
 import asyncio
 import hashlib
 import json
-import math
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import (
     JSON,
     Column,
@@ -29,56 +26,9 @@ from app.db.grading_repository import (
     GradingRecordNotFoundError,
     grading_metadata,
 )
+from app.dto.training import Candidate
 from app.model.assessment import utc_datetime
 from app.service.llm_client import LocalLLMClient
-
-
-class Candidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
-    dataset_checksum: str = Field(pattern=r"^[a-f0-9]{64}$")
-    dataset_version: str = Field(pattern=r"^[a-f0-9-]{36}$")
-    completed_at: datetime
-    base_model: Literal["Qwen/Qwen3.5-9B"]
-    hf_repo: str = Field(max_length=160)
-    hf_branch: str = Field(pattern=r"^candidate-[a-f0-9]{32}$")
-    hf_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    output_contract: Literal["criteria_array_v1", "grading_json_v1"]
-    metrics: dict
-    baseline_metrics: dict
-    configuration: dict
-    dataset_stats: dict = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def branch_matches_run(self):
-        if self.hf_branch != "candidate-" + self.run_id:
-            raise ValueError("Candidate branch must match its run id")
-        return self
-
-    @field_validator("metrics", "baseline_metrics", "configuration", "dataset_stats")
-    @classmethod
-    def finite_json(cls, value):
-        json.dumps(value, allow_nan=False)
-        return value
-
-    @field_validator("metrics")
-    @classmethod
-    def evaluated(cls, value):
-        valid = value.get("valid_examples")
-        mae = value.get("final_score_mae")
-        if type(valid) not in (int, float) or not math.isfinite(valid) or valid < 1:
-            raise ValueError("Evaluation must contain valid held-out examples")
-        if type(mae) not in (int, float) or not math.isfinite(mae) or mae < 0:
-            raise ValueError("Evaluation must contain a finite nonnegative MAE")
-        return value
-
-    @field_validator("completed_at")
-    @classmethod
-    def aware_time(cls, value):
-        if value.tzinfo is None:
-            raise ValueError("completed_at requires a timezone")
-        return value.astimezone(UTC)
-
 
 runs = Table(
     "training_model_runs",
@@ -178,7 +128,7 @@ class ModelRegistry:
                 for row in connection.execute(query).mappings()
             ]
 
-    def register(self, candidate):
+    def register(self, candidate: Candidate):
         if candidate.hf_repo != self.settings.training_hf_repo:
             raise ValueError("Candidate repository is not allowed")
         manifest = candidate.model_dump(mode="json")
@@ -417,12 +367,11 @@ class ModelRegistry:
                         )
             else:
                 result = await llm.grade(
-                    system_prompt="Return JSON with score, feedback, criteria_met containing criteria_id check and is_met true.",
-                    user_prompt="Award one point for mentioning TLS: HTTPS uses TLS.",
+                    system_prompt='Return JSON with criteria_met containing criteria_id "check" and boolean is_met. Do not generate a score or feedback.',
+                    user_prompt="Criterion check: Mentions TLS. Student answer: HTTPS uses TLS.",
                 )
                 if (
-                    result.score != 1
-                    or len(result.criteria_met) != 1
+                    len(result.criteria_met) != 1
                     or result.criteria_met[0].criteria_id != "check"
                     or not result.criteria_met[0].is_met
                 ):
