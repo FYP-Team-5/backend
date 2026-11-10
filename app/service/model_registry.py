@@ -150,6 +150,7 @@ class ModelRegistry:
             "contract": active["output_contract"],
             "hf_revision": active["hf_revision"],
             "fewshot_name": self.settings.llm_model,
+            "feedback_name": self.settings.llm_feedback_model,
         }
 
     def describe(self, row, active):

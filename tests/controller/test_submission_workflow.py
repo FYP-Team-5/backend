@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db.grading_repository import grade_changes
-from app.dto import CriteriaGradingResult
+from app.dto import FeedbackResult
 
 
 def student(client, number):
@@ -86,8 +86,8 @@ def wait_for_result(client, test_id, attempt_id, headers):
 def test_student_can_leave_return_and_see_instructor_grade_changes(
     client: TestClient, instructor_headers, llm_client, grading_repository
 ):
-    llm_client.grade.return_value = CriteriaGradingResult(
-        score=2, feedback="Automated feedback"
+    llm_client.generate_feedback.return_value = FeedbackResult(
+        feedback="Automated feedback"
     )
     headers, user_id = student(client, 1)
     other, _ = student(client, 2)
@@ -122,7 +122,7 @@ def test_student_can_leave_return_and_see_instructor_grade_changes(
             "responses": [
                 {
                     "response_id": reviewed["responses"][0]["id"],
-                    "score": 4,
+                    "score": 2,
                     "feedback": "Instructor feedback",
                 }
             ],
@@ -132,20 +132,19 @@ def test_student_can_leave_return_and_see_instructor_grade_changes(
     reopened = client.get(
         f"/api/v1/tests/{test['id']}/attempts/{attempt_id}", headers=headers
     ).json()
-    assert reopened["total_score"] == 4
-    assert reopened["percentage"] == 100
-    assert reopened["responses"][0]["original_score"] == 2
+    assert reopened["total_score"] == 2
+    assert reopened["percentage"] == 50
+    assert reopened["responses"][0]["original_score"] == 4
     assert reopened["responses"][0]["feedback"] == "Instructor feedback"
     with grading_repository.engine.connect() as connection:
         audit = connection.execute(select(grade_changes)).mappings().one()
-    assert audit["old_score"] == 2 and audit["new_score"] == 4
+    assert audit["old_score"] == 4 and audit["new_score"] == 2
     assert audit["editor_id"] != user_id
 
 
 def test_latest_submission_listing_includes_students_without_submissions(
     client, instructor_headers, llm_client
 ):
-    llm_client.grade.return_value = CriteriaGradingResult(score=2, feedback="Feedback")
     headers, user_id = student(client, 1)
     _, other_id = student(client, 2)
     test = make_test(client, instructor_headers)
@@ -158,7 +157,7 @@ def test_latest_submission_listing_includes_students_without_submissions(
     rows = client.get(url, headers=instructor_headers).json()
     by_user = {row["user_id"]: row for row in rows}
     assert by_user[user_id]["latest_submission"]["id"] == attempt_id
-    assert by_user[user_id]["total_score"] == 2
+    assert by_user[user_id]["total_score"] == 4
     assert by_user[other_id]["latest_submission"] is None
     assert by_user[other_id]["latest_graded_submission"] is None
 
@@ -171,9 +170,9 @@ def test_closure_rejects_new_answers_but_pending_grading_finishes(
     async def delayed_grade(**kwargs):
         while not release.is_set():
             await asyncio.sleep(0.01)
-        return CriteriaGradingResult(score=2, feedback="Feedback")
+        return [1]
 
-    llm_client.grade.side_effect = delayed_grade
+    llm_client.grade_binary.side_effect = delayed_grade
     headers, _ = student(client, 1)
     other_headers, _ = student(client, 2)
     test = make_test(client, instructor_headers)
@@ -257,7 +256,6 @@ def test_student_test_and_result_views_hide_instructor_material(
 ):
     from app.dto import ExampleCreate
 
-    llm_client.grade.return_value = CriteriaGradingResult(score=2, feedback="Feedback")
     headers, _ = student(client, 1)
     test = make_test(client, instructor_headers)
     question = test["questions"][0]

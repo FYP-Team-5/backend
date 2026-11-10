@@ -283,6 +283,7 @@ def test_deployed_binary_adapter_uses_weights_and_freezes_model_for_accepted_job
         "contract": "criteria_array_v1",
         "hf_revision": "c" * 40,
         "fewshot_name": settings.llm_model,
+        "feedback_name": settings.llm_feedback_model,
     }
 
 

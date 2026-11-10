@@ -1,6 +1,5 @@
 import asyncio
 import io
-import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +12,7 @@ from app.db.dataset_repository import dataset_source_rows, dataset_versions
 from app.db.grading_repository import tests
 from app.db.grading_workflow import LeaseLostError
 from app.dto import (
-    CriteriaGradingResult,
+    FeedbackResult,
     GradeAttemptRequest,
     SubmissionGradeUpdate,
     TestCreate,
@@ -50,16 +49,11 @@ def seed_row(answer="Seed answer"):
 
 
 class Grader:
-    async def grade(self, **kwargs):
-        ids = re.findall(r'<criterion id="([^"]+)"', kwargs["user_prompt"])
-        return CriteriaGradingResult(
-            score=2,
-            feedback="Feedback",
-            criteria_met=[
-                {"criteria_id": value, "is_met": index == 0}
-                for index, value in enumerate(ids)
-            ],
-        )
+    async def grade_binary(self, **kwargs):
+        return [1] + [0] * (len(kwargs["criteria"]) - 1)
+
+    async def generate_feedback(self, **kwargs):
+        return FeedbackResult(feedback="Feedback")
 
     async def close(self):
         pass

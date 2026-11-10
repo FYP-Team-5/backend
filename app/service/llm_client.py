@@ -6,7 +6,12 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from app.dto import CriteriaGradingResult, FewShotGradingResult
+from app.dto import (
+    CriteriaEvaluationResult,
+    CriteriaGradingResult,
+    FeedbackResult,
+    FewShotGradingResult,
+)
 
 JSON_CODE_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 
@@ -69,6 +74,7 @@ class LocalLLMClient:
         user_prompt: str,
         model: str | None = None,
         array: bool = False,
+        plain_text: bool = False,
     ) -> str:
         try:
             response = await self._client.post(
@@ -81,7 +87,11 @@ class LocalLLMClient:
                     ],
                     "temperature": self.temperature,
                     "max_tokens": self.max_tokens,
-                    **({} if array else {"response_format": {"type": "json_object"}}),
+                    **(
+                        {}
+                        if array or plain_text
+                        else {"response_format": {"type": "json_object"}}
+                    ),
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
             )
@@ -114,6 +124,30 @@ class LocalLLMClient:
             raise LLMResponseError(
                 f"LLM returned an invalid grading result: {exc}"
             ) from exc
+
+    async def grade_criteria(
+        self, *, system_prompt: str, user_prompt: str, model: str | None = None
+    ) -> CriteriaEvaluationResult:
+        content = await self._request_content(
+            system_prompt=system_prompt, user_prompt=user_prompt, model=model
+        )
+        try:
+            return CriteriaEvaluationResult.model_validate_json(content)
+        except ValidationError as exc:
+            raise LLMResponseError(
+                f"LLM returned invalid criterion decisions: {exc}"
+            ) from exc
+
+    async def generate_feedback(
+        self, *, system_prompt: str, user_prompt: str, model: str
+    ) -> FeedbackResult:
+        content = await self._request_content(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=model,
+            plain_text=True,
+        )
+        return FeedbackResult(feedback=content)
 
     async def grade_fewshot(
         self, *, system_prompt: str, user_prompt: str, model: str | None = None

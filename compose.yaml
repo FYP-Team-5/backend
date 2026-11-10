@@ -23,6 +23,8 @@ services:
       SEED_DEMO_USERS: ${SEED_DEMO_USERS:-true}
       LLM_URL: ${LLM_URL:-http://host.docker.internal:11434/v1/chat/completions}
       LLM_MODEL: ${LLM_MODEL:-local-model}
+      LLM_GRADING_CONTRACT: ${LLM_GRADING_CONTRACT:-criteria_array_v1}
+      LLM_FEEDBACK_MODEL: ${LLM_FEEDBACK_MODEL:-qwen35-9b-feedback-qlora}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-1}

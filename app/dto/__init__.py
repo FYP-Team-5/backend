@@ -16,8 +16,10 @@ from app.dto.assessment import (
 )
 from app.dto.auth import TokenClaims
 from app.dto.grading import (
+    CriteriaEvaluationResult,
     CriteriaGradingResult,
     CriteriaMetResult,
+    FeedbackResult,
     FewShotGradingResult,
 )
 from app.dto.health import HealthResponse
@@ -34,9 +36,11 @@ __all__ = [
     "AttemptGradeResponse",
     "CourseCreate",
     "CriteriaCreate",
+    "CriteriaEvaluationResult",
     "CriteriaGradingResult",
     "CriteriaMetResult",
     "ExampleCreate",
+    "FeedbackResult",
     "FewShotGradeRequest",
     "FewShotGradingResult",
     "GradeAttemptRequest",
