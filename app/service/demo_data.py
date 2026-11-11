@@ -90,7 +90,7 @@ class DemoDataService:
                 DEMO_TRAINING_DATASET.name,
                 # A stable key migrates older demo datasets once, while keeping
                 # later instructor uploads active across application restarts.
-                request_key="demo-mock-training-data-v1",
+                request_key="demo-mock-training-data-v2-feedback",
             )
 
     @staticmethod

@@ -11,6 +11,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.dto.grading import GradingOutputContract
 
 
+class FeedbackCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hf_repo: str = Field(max_length=160)
+    hf_branch: str = Field(pattern=r"^candidate-[a-f0-9]{32}$")
+    hf_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    configuration: dict
+    dataset_stats: dict = Field(default_factory=dict)
+
+    @field_validator("configuration", "dataset_stats")
+    @classmethod
+    def finite_json(cls, value):
+        json.dumps(value, allow_nan=False)
+        return value
+
+
 class Candidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -26,11 +41,14 @@ class Candidate(BaseModel):
     baseline_metrics: dict
     configuration: dict
     dataset_stats: dict = Field(default_factory=dict)
+    feedback: FeedbackCandidate | None = None
 
     @model_validator(mode="after")
     def branch_matches_run(self):
         if self.hf_branch != "candidate-" + self.run_id:
             raise ValueError("Candidate branch must match its run id")
+        if self.feedback and self.feedback.hf_branch != "candidate-" + self.run_id:
+            raise ValueError("Feedback candidate branch must match its run id")
         return self
 
     @field_validator("metrics", "baseline_metrics", "configuration", "dataset_stats")
@@ -70,6 +88,16 @@ class TrainingRunResponse(Candidate):
 class TrainingRegistrationResponse(BaseModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     registered: Literal[True]
+
+
+class TrainingRunInProgress(BaseModel):
+    """Live workflow view before (or without) a candidate manifest callback."""
+
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    execution_name: str = Field(max_length=120)
+    status: Literal["training", "failed"]
+    started_at: datetime
+    stopped_at: datetime | None = None
 
 
 class DeployRequest(BaseModel):

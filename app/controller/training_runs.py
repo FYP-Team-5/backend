@@ -16,6 +16,7 @@ from app.dto.training import (
     DeployRequest,
     TrainingDeploymentResponse,
     TrainingRegistrationResponse,
+    TrainingRunInProgress,
     TrainingRunResponse,
     TrainingStartRequest,
     TrainingStartResponse,
@@ -43,7 +44,13 @@ async def require_training_callback(
     openapi_extra={
         "requestBody": {
             "required": True,
-            "content": {"application/json": {"schema": Candidate.model_json_schema()}},
+            "content": {
+                "application/json": {
+                    "schema": Candidate.model_json_schema(
+                        ref_template="#/components/schemas/{model}"
+                    )
+                }
+            },
         }
     },
 )
@@ -75,6 +82,15 @@ async def register(request: Request):
 )
 async def list_runs(request: Request):
     return await asyncio.to_thread(request.app.state.model_registry.list_runs)
+
+
+@router.get(
+    "/training-runs/in-progress",
+    dependencies=[Depends(require_api_key), Depends(require_instructor)],
+    response_model=list[TrainingRunInProgress],
+)
+async def list_runs_in_progress(request: Request):
+    return await asyncio.to_thread(request.app.state.training_service.in_progress)
 
 
 @router.post(

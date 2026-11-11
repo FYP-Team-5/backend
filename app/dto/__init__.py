@@ -30,6 +30,7 @@ from app.dto.training import (
     DeployRequest,
     TrainingDeploymentResponse,
     TrainingRegistrationResponse,
+    TrainingRunInProgress,
     TrainingRunResponse,
 )
 from app.dto.user import (
@@ -73,6 +74,7 @@ __all__ = [
     "TokenResponse",
     "TrainingDeploymentResponse",
     "TrainingRegistrationResponse",
+    "TrainingRunInProgress",
     "TrainingRunResponse",
     "UserResponse",
     "UserStatusUpdate",

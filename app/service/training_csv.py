@@ -1,4 +1,4 @@
-"""The eight-column rubric CSV contract shared with the QLoRA repository."""
+"""Rubric training CSVs with feedback targets and legacy upload support."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import io
 import json
 import math
 
-COLUMNS = [
+SCHEMA_VERSION = 2
+LEGACY_COLUMNS = [
     "id",
     "question",
     "desired_answer",
@@ -17,6 +18,7 @@ COLUMNS = [
     "criteria_max_score[]",
     "student_score",
 ]
+COLUMNS = [*LEGACY_COLUMNS, "feedback"]
 ARRAY_COLUMNS = COLUMNS[4:7]
 
 
@@ -30,9 +32,12 @@ def validate_row(row: dict, line: int = 0) -> dict:
     def fail(message):
         raise TrainingCsvError(prefix + message)
 
-    if set(row) != set(COLUMNS):
+    if set(row) not in (set(LEGACY_COLUMNS), set(COLUMNS)):
         fail("columns must match the reference rubric CSV.")
     result = dict(row)
+    result.setdefault("feedback", "")
+    if not isinstance(result["feedback"], str):
+        fail("feedback must be text.")
     for key in COLUMNS[:4]:
         if not isinstance(row[key], str):
             fail(f"{key} must be text.")
@@ -91,7 +96,7 @@ def parse_training_csv(source) -> list[dict]:
     text = io.TextIOWrapper(source, encoding="utf-8-sig", newline="")
     try:
         reader = csv.DictReader(text, strict=True)
-        if reader.fieldnames != COLUMNS:
+        if reader.fieldnames not in (LEGACY_COLUMNS, COLUMNS):
             raise TrainingCsvError(
                 "CSV header and column order must be: " + ",".join(COLUMNS)
             )
@@ -112,6 +117,9 @@ def write_training_csv(rows, target) -> None:
         writer.writeheader()
         for row in rows:
             values = dict(row)
+            # Saved seed snapshots from before feedback was introduced remain
+            # valid; do not invent targets for those historical examples.
+            values.setdefault("feedback", "")
             for key in ARRAY_COLUMNS:
                 values[key] = json.dumps(
                     values[key],

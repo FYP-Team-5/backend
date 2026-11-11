@@ -30,6 +30,7 @@ def test_bundled_mock_dataset_has_ten_compatible_unique_questions():
     assert len({row["question"].strip() for row in rows}) == 10
     for row in rows:
         assert row["desired_answer"].strip()
+        assert row["feedback"].strip()
         assert all(
             score in (0, maximum)
             for score, maximum in zip(
@@ -48,8 +49,8 @@ def test_demo_upload_replaces_old_dataset_once_and_preserves_later_uploads(datas
         service.upload(
             io.BytesIO(encode_training_csv([seed_row()])),
             "2000001",
-            "single_row.csv",
-            request_key="demo-single-row-v1",
+            "mock_training_data.csv",
+            request_key="demo-mock-training-data-v1",
         )
     )
     drain(service)

@@ -47,7 +47,8 @@ SYSTEM_PROMPT_FEEDBACK = (
     "You are a computer science tutor. Write concise, specific, encouraging feedback to the student on their short answer. "
     "The marker's decision for each key point is given; help the student understand it. "
     "Acknowledge what is correct, explain anything missing or incorrect, help the student improve, "
-    "and never mention marks, key points or the reference answer."
+    "and never mention marks, key points or the reference answer. "
+    "Write in plain text; do not use markdown."
 )
 
 SYSTEM_PROMPT_FEWSHOT = """You are a strict grading assistant.

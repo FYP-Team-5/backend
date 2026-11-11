@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import hashlib
 import io
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,7 +10,13 @@ from sqlalchemy import create_engine, select, update
 
 from app.config import Settings
 from app.db import GradingConflictError, PostgresGradingRepository
-from app.db.dataset_repository import dataset_source_rows, dataset_versions
+from app.db.dataset_repository import (
+    dataset_source_rows,
+    dataset_versions,
+)
+from app.db.dataset_repository import (
+    test_dataset_exports as export_records,
+)
 from app.db.grading_repository import tests
 from app.db.grading_workflow import LeaseLostError
 from app.dto import (
@@ -22,6 +30,7 @@ from app.service.dataset_service import DatasetService
 from app.service.dataset_storage import DatasetStorageError
 from app.service.training_csv import (
     COLUMNS,
+    LEGACY_COLUMNS,
     TrainingCsvError,
     encode_training_csv,
     parse_training_csv,
@@ -45,6 +54,7 @@ def seed_row(answer="Seed answer"):
         "criteria_score[]": [1],
         "criteria_max_score[]": [1],
         "student_score": 1,
+        "feedback": "Seed feedback",
     }
 
 
@@ -165,6 +175,36 @@ def test_reference_csv_round_trip_retains_all_examples_and_arrays():
     )
 
 
+def legacy_csv(rows):
+    """Encode the published format used before feedback targets were added."""
+    current = list(csv.DictReader(io.StringIO(encode_training_csv(rows).decode())))
+    target = io.StringIO(newline="")
+    writer = csv.DictWriter(target, fieldnames=LEGACY_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows({key: row[key] for key in LEGACY_COLUMNS} for row in current)
+    return target.getvalue().encode()
+
+
+def test_legacy_csv_imports_with_blank_feedback_and_exports_new_header():
+    rows = parse_training_csv(io.BytesIO(legacy_csv([seed_row()])))
+    assert rows[0]["feedback"] == ""
+    assert encode_training_csv(rows).decode().splitlines()[0].split(",") == COLUMNS
+    assert parse_training_csv(io.BytesIO(encode_training_csv(rows))) == rows
+
+
+def test_feedback_survives_csv_quotes_newlines_and_unicode():
+    row = {**seed_row(), "feedback": 'Try "abstraction", then explain reuse.\n很好。'}
+    assert parse_training_csv(io.BytesIO(encode_training_csv([row]))) == [row]
+
+
+def test_saved_seed_without_feedback_exports_a_blank_target():
+    row = seed_row()
+    row.pop("feedback")
+    assert (
+        parse_training_csv(io.BytesIO(encode_training_csv([row])))[0]["feedback"] == ""
+    )
+
+
 @pytest.mark.parametrize(
     "column,value",
     [
@@ -177,6 +217,8 @@ def test_reference_csv_round_trip_retains_all_examples_and_arrays():
         ("student_score", float("inf")),
         ("criteria[]", ["A", "B"]),
         ("question", "  "),
+        ("feedback", None),
+        ("feedback", 123),
     ],
 )
 def test_invalid_training_rows_are_rejected(column, value):
@@ -219,6 +261,9 @@ def test_closed_test_data_appends_once_and_uploads_preserve_generated_rows(datas
     assert len(rows) == 3  # identical answers from two students remain distinct
     assert len({row["id"] for row in rows}) == 1
     assert rows[1]["criteria_score[]"] == [2, 0]
+    assert rows[0]["feedback"] == "Seed feedback"
+    assert all(row["feedback"] == "Feedback" for row in rows[1:])
+    assert active["schema_version"] == 2
     count = len(asyncio.run(service.list_versions()))
     drain(service)
     assert len(asyncio.run(service.list_versions())) == count
@@ -232,6 +277,58 @@ def test_closed_test_data_appends_once_and_uploads_preserve_generated_rows(datas
     drain(service)
     assert len(download(service)[0]) == 3
     assert active["status"] == "ready"
+
+
+def test_reupload_legacy_snapshot_preserves_seed_without_duplicating_test_rows(dataset):
+    service, grader, test, storage = dataset
+    upload(service)
+    drain(service)
+    submit(grader, test)
+    grader.workflow.end_test(test.id, "instructor")
+    drain(service)
+    rows, metadata = download(service)
+    old_payload = legacy_csv(rows)
+    checksum = hashlib.sha256(old_payload).hexdigest()
+    raw, _ = service.repository.get_version(metadata["id"])
+    # Recreate an immutable version published by the previous eight-column writer.
+    old_key = raw["object_key"].replace(raw["checksum"], checksum)
+    storage.objects[old_key] = old_payload
+    with service.repository.engine.begin() as connection:
+        connection.execute(
+            update(dataset_versions)
+            .where(dataset_versions.c.id == metadata["id"])
+            .values(
+                checksum=checksum,
+                object_key=old_key,
+                byte_size=len(old_payload),
+                schema_version=1,
+            )
+        )
+    asyncio.run(service.upload(io.BytesIO(old_payload), "instructor", "legacy.csv"))
+    drain(service)
+    assert len(download(service)[0]) == 2
+    source, _ = asyncio.run(service.download(metadata["id"]))
+    with source:
+        assert source.read() == old_payload
+
+
+def test_schema_upgrade_refreshes_feedback_in_existing_closed_test_ledger(dataset):
+    service, grader, test, _ = dataset
+    submit(grader, test)
+    grader.workflow.end_test(test.id, "instructor")
+    drain(service)
+    with service.repository.engine.begin() as connection:
+        source = connection.execute(select(dataset_source_rows)).mappings().one()
+        legacy_row = dict(source["row"])
+        legacy_row.pop("feedback")
+        connection.execute(update(dataset_source_rows).values(row=legacy_row))
+        connection.execute(
+            update(export_records).values(fingerprint="legacy-fingerprint")
+        )
+    drain(service)
+    with service.repository.engine.connect() as connection:
+        refreshed = connection.execute(select(dataset_source_rows)).mappings().one()
+    assert refreshed["row"]["feedback"] == "Feedback"
 
 
 def test_merged_export_is_validated_before_publication(dataset):
@@ -458,7 +555,7 @@ def test_download_detects_corrupted_object(dataset):
         download(service)
 
 
-def test_feedback_only_edits_keep_label_provenance_and_do_not_add_versions(dataset):
+def test_feedback_only_edits_publish_new_version_and_keep_label_provenance(dataset):
     from app.db.dataset_repository import dataset_source_rows
 
     service, grader, test, _ = dataset
@@ -466,6 +563,7 @@ def test_feedback_only_edits_keep_label_provenance_and_do_not_add_versions(datas
     grader.workflow.end_test(test.id, "instructor")
     drain(service)
     before = len(service.repository.list_versions())
+    old_rows, old = download(service)
     result = asyncio.run(grader.get_submission(test.id, attempt.id))
     asyncio.run(
         grader.edit_submission(
@@ -485,7 +583,12 @@ def test_feedback_only_edits_keep_label_provenance_and_do_not_add_versions(datas
         )
     )
     drain(service)
-    assert len(service.repository.list_versions()) == before
+    assert len(service.repository.list_versions()) == before + 1
+    new_rows, current = download(service)
+    assert new_rows[0]["feedback"] == "Clarified feedback only"
+    assert new_rows[0]["criteria_score[]"] == old_rows[0]["criteria_score[]"]
+    assert current["checksum"] != old["checksum"]
+    assert download(service, old["id"])[0][0]["feedback"] == "Feedback"
     with service.repository.engine.connect() as connection:
         row = connection.execute(select(dataset_source_rows)).mappings().one()
     assert row["label_source"] == "llm"

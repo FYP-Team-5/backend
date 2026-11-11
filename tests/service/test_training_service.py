@@ -1,5 +1,6 @@
+import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
@@ -129,3 +130,67 @@ def test_unconfigured_manual_training_does_not_call_aws(settings):
         with pytest.raises(TrainingUnavailableError):
             service.start("2000001", TrainingStartRequest(request_id=uuid4()))
         session.assert_not_called()
+
+
+def execution(name, status, minutes_ago, stopped_minutes_ago=None):
+    start = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    item = {
+        "executionArn": ARN.replace(":stateMachine:", ":execution:") + ":" + name,
+        "name": name,
+        "status": status,
+        "startDate": start,
+    }
+    if stopped_minutes_ago is not None:
+        item["stopDate"] = datetime.now(UTC) - timedelta(minutes=stopped_minutes_ago)
+    return item
+
+
+def setup_progress(settings, executions):
+    settings.training_state_machine_arn = ARN
+    workflow = Mock(spec=["list_executions", "close"])
+    workflow.list_executions.return_value = {"executions": executions}
+    session = MagicMock()
+    session.client.return_value = workflow
+    return TrainingService(settings, MagicMock()), workflow, session
+
+
+def test_in_progress_lists_running_execution_and_one_recent_failure(settings):
+    items = [
+        execution("manual-newer", "SUCCEEDED", 5, 1),
+        execution("manual-running", "RUNNING", 20),
+        execution("nightly-failed", "FAILED", 90, 30),
+        execution("nightly-stale", "FAILED", 5000, 2400),
+    ]
+    service, workflow, session = setup_progress(settings, items)
+    with patch("app.service.training_service.boto3.Session", return_value=session):
+        result = service.in_progress()
+    assert [item["execution_name"] for item in result] == [
+        "manual-running",
+        "nightly-failed",
+    ]
+    assert [item["status"] for item in result] == ["training", "failed"]
+    assert (
+        result[0]["run_id"]
+        == hashlib.sha256(items[1]["executionArn"].encode()).hexdigest()[:32]
+    )
+    assert result[1]["stopped_at"] is not None
+    assert workflow.list_executions.call_args.kwargs["stateMachineArn"] == ARN
+    workflow.close.assert_called_once_with()
+
+
+def test_in_progress_without_configuration_does_not_call_aws(settings):
+    service, _, _ = setup_progress(settings, [])
+    settings.training_state_machine_arn = None
+    with patch("app.service.training_service.boto3.Session") as factory:
+        assert service.in_progress() == []
+        factory.assert_not_called()
+
+
+def test_in_progress_swallow_aws_failures(settings):
+    service, workflow, session = setup_progress(settings, [])
+    workflow.list_executions.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "secret"}}, "ListExecutions"
+    )
+    with patch("app.service.training_service.boto3.Session", return_value=session):
+        assert service.in_progress() == []
+    workflow.close.assert_called_once_with()

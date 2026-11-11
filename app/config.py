@@ -28,6 +28,7 @@ class Settings(BaseSettings):
         pattern=r"^arn:[^:]+:states:[^:]+:[0-9]{12}:stateMachine:[A-Za-z0-9_-]{1,80}$",
     )
     training_hf_repo: str = "SmuFypTeam5/GradingQlora"
+    training_feedback_hf_repo: str = "SmuFypTeam5/feedback"
     training_adapter_directory: str = "/mnt/llm-data/adapters"
     training_max_lora_rank: int = Field(default=64, ge=1, le=512)
 

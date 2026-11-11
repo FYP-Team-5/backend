@@ -531,11 +531,11 @@ A new upload replaces the seed examples while retaining automatically collected
 test rows. Re-uploading an exact previously published snapshot recognizes its
 seed snapshot and avoids importing its generated rows a second time.
 
-The CSV contract matches
-`qlora/Datasets/training_data_moh_eng_rubrics.csv` in the sibling QLoRA checkout:
+Dataset schema version 2 extends the rubric CSV with a trailing `feedback`
+target:
 
 ```csv
-id,question,desired_answer,student_answer,criteria[],criteria_score[],criteria_max_score[],student_score
+id,question,desired_answer,student_answer,criteria[],criteria_score[],criteria_max_score[],student_score,feedback
 ```
 
 Array cells contain JSON arrays quoted by the CSV writer. UTF-8 BOMs, quoted
@@ -544,6 +544,9 @@ be finite, within criterion maxima, and add up to `student_score`. Blank student
 answers are accepted with zero scores, matching the reference dataset. Dataset
 files remain CSV; provenance, source revisions, and job metadata live in
 PostgreSQL. Student names, emails, and institutional numbers are not added to CSVs.
+`feedback` contains the saved explanation for that answer. Legacy eight-column
+uploads remain accepted and receive blank feedback targets; new exports always
+include the ninth column. Historical CSV objects remain unchanged.
 
 ### Automatic collection
 
@@ -553,7 +556,10 @@ attempt and waits for accepted grading to settle. It exports complete, graded
 latest attempts; failed/latest-pending submissions never cause an older graded
 attempt to be used instead. Failed grading can later be retried and included.
 
-Each eligible question contributes one row using its accepted rubric snapshot.
+Each eligible question contributes one row using its accepted rubric snapshot
+and saved response feedback. Instructor-edited feedback takes precedence because
+the export uses the current saved response. Feedback-only edits also publish a
+new version, preserving the previous CSV and the original criterion labels.
 Automatically generated rows have stable source identities in a separate ledger,
 so repeated scans or worker recovery do not append duplicate rows. Instructor
 corrections after closure create a new CSV version with corrected rows while
@@ -661,6 +667,14 @@ retrying an uncertain response. A 202 acknowledges the workflow request; it does
 not mean GPU training has begun. An absent ready dataset returns 409, and missing
 workflow configuration or unavailable AWS access returns 503.
 
+`GET /api/v1/training-runs/in-progress` (instructor bearer token and API key)
+reports live workflow state before any candidate exists: running executions plus
+the most recent failure within 36 hours, for nightly and manual runs alike. Its
+`run_id` is derived from the execution ARN exactly as the workflow derives it, so
+a registered candidate later carries the same identity. Without
+`TRAINING_STATE_MACHINE_ARN` or AWS access it returns an empty list; the Trained
+models page polls it with the candidate list.
+
 The [mock training dataset](app/demo/dataset/README.md) contains ten rows with ten
 unique questions, giving an 8/1/1 training/validation/test split. With demo seeding
 enabled, startup uploads `mock_training_data.csv` once as a new version,
@@ -671,10 +685,21 @@ training runner accepts any nonempty compatible dataset; below ten unique
 questions it reuses training rows for validation and evaluation and records
 `held_out_evaluation=false` in the candidate configuration.
 
-The deployment workflow publishes evaluated adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics.
+The deployment workflow publishes grading adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics. If the workflow logs a publication/notification failure, the callback response explains it: 404 = the backend image predates this endpoint (rebuild/redeploy the API container), 401 = the token mismatch (backend `TRAINING_CALLBACK_TOKEN` vs the SSM callback-token parameter), 503 = the backend has no `TRAINING_CALLBACK_TOKEN` configured, 409 = the run id was already registered with different metadata, 422 = manifest validation failed (see the workflow log body).
+
+New runs train grading first and feedback second, using the same dataset and
+question split. Feedback follows the feedback repository's Qwen3.5-9B notebook
+(rank 16 / alpha 32) and is published to `SmuFypTeam5/feedback` on its own
+`candidate-<run-id>` branch. Both HF commits are saved in one run record: the
+optional `feedback` object contains its HF identity, configuration and dataset
+counts, with no metrics. Trained Models shows both adapters in one card and
+keeps the metrics table specific to grading. Legacy grading-only runs remain
+readable and deployable. Configure `TRAINING_FEEDBACK_HF_REPO` to match the
+publisher; both candidate repositories must allow anonymous reads. The existing
+SSM upload token needs write permission for both repositories.
 
 Verified instructors use `GET /api/v1/training-runs` and `POST /api/v1/training-runs/{run_id}/deploy` with `{"revision": <current revision>}`. Deployment returns 202 and runs through a persisted PostgreSQL worker. It validates the pinned adapter's files/base model/rank, loads a separate vLLM alias and checks grading responses before atomically updating the active pointer. Failed or stale work cannot replace the active model; the page shows status and a retry action. Choosing a previous candidate explicitly supports rollback. This repository has an instructor role; no separate admin role is introduced.
 
 The HF repository is public; candidate downloads are anonymous. Only the publisher needs an upload token, stored in SSM. Set the backend `TRAINING_HF_REPO`, `TRAINING_CALLBACK_TOKEN` and shared `MODEL_ADAPTER_DIRECTORY` as described in `.env.example`. The host's updated vLLM wrapper must opt into runtime LoRA loading and the filesystem resolver, with the same adapter directory path available inside the API container. Keep vLLM administration private. See the deployment repository's `autotraining/README.md` for credential names and serving configuration; these changes do not replace the serving EC2 instance.
 
-The binary rubric contract is supported explicitly: criterion labels must be exactly aligned integer 0/1 values and map to saved weights/criterion ids. A separate feedback model explains both met and unmet criteria using the feedback adapter's training prompt. Few-shot grading uses the original configured model. Accepted jobs save the rubric model name/contract/HF revision and feedback model name, retaining them through retries and partial submissions. Missing approved grading adapter cache files can be restored from that exact HF revision. Feedback adapter deployment is configured separately from the grading candidate registry.
+The binary rubric contract is supported explicitly: criterion labels must be exactly aligned integer 0/1 values and map to saved weights/criterion ids. A separate feedback model explains both met and unmet criteria using the feedback adapter's training prompt. Few-shot grading uses the original configured model. Accepted jobs save the rubric model name/contract/HF revision and feedback model name, retaining them through retries and partial submissions. Missing approved grading adapter cache files can be restored from that exact HF revision. Paired runs deploy grading and feedback adapters together after compatibility checks; accepted jobs retain both pinned versions.

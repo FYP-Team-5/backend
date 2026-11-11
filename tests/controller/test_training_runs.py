@@ -123,6 +123,46 @@ def test_training_api_openapi_describes_current_request_and_response_contracts(c
         "request_id"
         in schema["components"]["schemas"]["TrainingStartRequest"]["required"]
     )
+    in_progress = routes["/api/v1/training-runs/in-progress"]["get"]
+    assert in_progress["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["items"]["$ref"].endswith("/TrainingRunInProgress")
+
+
+def test_in_progress_training_runs_report_workflow_state(client, instructor_headers):
+    started = "2026-11-11T00:00:00Z"
+    service = MagicMock()
+    service.in_progress.return_value = [
+        {
+            "run_id": "a" * 32,
+            "execution_name": "manual-" + "b" * 64,
+            "status": "training",
+            "started_at": started,
+            "stopped_at": None,
+        }
+    ]
+    client.app.state.training_service = service
+    assert client.get("/api/v1/training-runs/in-progress").status_code == 401
+    student_headers, _ = student(client, "manual-in-progress")
+    assert (
+        client.get(
+            "/api/v1/training-runs/in-progress", headers=student_headers
+        ).status_code
+        == 403
+    )
+    response = client.get(
+        "/api/v1/training-runs/in-progress", headers=instructor_headers
+    )
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "run_id": "a" * 32,
+            "execution_name": "manual-" + "b" * 64,
+            "status": "training",
+            "started_at": started,
+            "stopped_at": None,
+        }
+    ]
 
 
 def test_manual_training_is_instructor_only(client, instructor_headers):
@@ -277,6 +317,7 @@ def test_review_and_deployment_reject_students_and_callback_tokens(client, setti
     headers, _ = student(client, 42)
     for method, path, payload in (
         ("GET", "/training-runs", None),
+        ("GET", "/training-runs/in-progress", None),
         ("POST", f"/training-runs/{'a' * 32}/deploy", {"revision": 0}),
     ):
         assert (

@@ -100,7 +100,14 @@ class ModelRegistry:
             "contract": active["output_contract"],
             "hf_revision": active["hf_revision"],
             "fewshot_name": self.settings.llm_model,
-            "feedback_name": self.settings.llm_feedback_model,
+            "feedback_name": "feedback-candidate-" + active["run_id"]
+            if active.get("feedback")
+            else self.settings.llm_feedback_model,
+            **(
+                {"feedback_hf_revision": active["feedback"]["hf_revision"]}
+                if active.get("feedback")
+                else {}
+            ),
         }
 
     def describe(self, row, active):
@@ -131,7 +138,13 @@ class ModelRegistry:
     def register(self, candidate: Candidate):
         if candidate.hf_repo != self.settings.training_hf_repo:
             raise ValueError("Candidate repository is not allowed")
-        manifest = candidate.model_dump(mode="json")
+        if candidate.feedback and (
+            candidate.feedback.hf_repo != self.settings.training_feedback_hf_repo
+            or candidate.feedback.hf_repo == candidate.hf_repo
+        ):
+            raise ValueError("Feedback candidate repository is not allowed")
+        # Keep historical grading-only callback digests stable.
+        manifest = candidate.model_dump(mode="json", exclude_none=True)
         digest = hashlib.sha256(
             json.dumps(manifest, sort_keys=True).encode()
         ).hexdigest()
@@ -275,15 +288,16 @@ class ModelRegistry:
                 )
             )
 
-    def download(self, manifest):
+    def download(self, manifest, *, feedback=False):
         from huggingface_hub import snapshot_download
 
         directory = Path(self.settings.training_adapter_directory) / (
-            "candidate-" + manifest["run_id"]
+            ("feedback-candidate-" if feedback else "candidate-") + manifest["run_id"]
         )
+        adapter = manifest["feedback"] if feedback else manifest
         snapshot_download(
-            repo_id=manifest["hf_repo"],
-            revision=manifest["hf_revision"],
+            repo_id=adapter["hf_repo"],
+            revision=adapter["hf_revision"],
             token=False,
             local_dir=directory,
             allow_patterns=["adapter_config.json", "adapter_model.safetensors"],
@@ -305,11 +319,21 @@ class ModelRegistry:
         name = config.get("name", "")
         if not name.startswith("candidate-"):
             return
-        directory = Path(self.settings.training_adapter_directory) / name
-        if all(
-            (directory / item).is_file()
-            for item in ("adapter_config.json", "adapter_model.safetensors")
-        ):
+        feedback_name = config.get("feedback_name", "")
+        missing = [
+            (adapter_name, is_feedback)
+            for adapter_name, is_feedback in ((name, False), (feedback_name, True))
+            if adapter_name.startswith(
+                "feedback-candidate-" if is_feedback else "candidate-"
+            )
+            and not all(
+                (
+                    Path(self.settings.training_adapter_directory) / adapter_name / item
+                ).is_file()
+                for item in ("adapter_config.json", "adapter_model.safetensors")
+            )
+        ]
+        if not missing:
             return
 
         def manifest_for_job():
@@ -323,10 +347,22 @@ class ModelRegistry:
                 raise ValueError(
                     "Saved grading revision no longer matches the candidate"
                 )
+            if feedback_name.startswith("feedback-candidate-") and (
+                feedback_name != "feedback-candidate-" + manifest["run_id"]
+                or manifest.get("feedback", {}).get("hf_revision")
+                != config.get("feedback_hf_revision")
+            ):
+                raise ValueError(
+                    "Saved feedback revision no longer matches the candidate"
+                )
             return manifest
 
         manifest = await asyncio.to_thread(manifest_for_job)
-        await asyncio.to_thread(self.download, manifest)
+        for _, is_feedback in missing:
+            if is_feedback:
+                await asyncio.to_thread(self.download, manifest, feedback=True)
+            else:
+                await asyncio.to_thread(self.download, manifest)
 
     async def check_and_load(self, manifest):
         path = await asyncio.to_thread(self.download, manifest)
@@ -378,6 +414,32 @@ class ModelRegistry:
                     raise ValueError(
                         "Candidate failed the JSON grading compatibility smoke test"
                     )
+            if manifest.get("feedback"):
+                feedback_path = await asyncio.to_thread(
+                    self.download, manifest, feedback=True
+                )
+                feedback_name = "feedback-candidate-" + manifest["run_id"]
+                if feedback_name not in available:
+                    loaded = await client.post(
+                        root + "/load_lora_adapter",
+                        json={"lora_name": feedback_name, "lora_path": feedback_path},
+                    )
+                    loaded.raise_for_status()
+                feedback_llm = LocalLLMClient(
+                    url=self.settings.llm_url, model=feedback_name, client=client
+                )
+                result = await feedback_llm.generate_feedback(
+                    model=feedback_name,
+                    system_prompt="You are a computer science tutor. Give concise feedback in plain text.",
+                    user_prompt="Question: Why is HTTPS secure?\nReference answer: HTTPS encrypts traffic using TLS.\nStudent answer: HTTPS uses TLS encryption.\nKey points: 1. [MET] Mentions encryption 2. [MET] Mentions TLS",
+                )
+                if not result.feedback.strip():
+                    raise ValueError("Feedback candidate returned empty text")
+                checks.update(
+                    feedback_adapter="passed",
+                    feedback_response="passed",
+                    pinned_feedback_hf_revision=manifest["feedback"]["hf_revision"],
+                )
         return {**checks, "grading_contract": "passed", "smoke_tests": "passed"}
 
     async def process(self):

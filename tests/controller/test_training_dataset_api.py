@@ -194,6 +194,7 @@ def test_criterion_corrections_enable_automatic_export_after_closure(
     )
     rows = list(csv.DictReader(io.StringIO(response.text)))
     assert len(rows) == 1 and float(rows[0]["student_score"]) == 4
+    assert rows[0]["feedback"] == "Reviewed"
 
 
 def test_storage_outage_does_not_fail_api_health_or_publish_partial_version(

@@ -45,6 +45,7 @@ from app.db.grading_workflow import LeaseLostError
 from app.model import Test
 from app.model.assessment import utc_datetime
 from app.service.training_csv import (
+    SCHEMA_VERSION,
     TrainingCsvError,
     encode_training_csv,
     parse_training_csv,
@@ -57,7 +58,7 @@ training_datasets = Table(
     "training_datasets",
     grading_metadata,
     Column("id", String(32), primary_key=True),
-    Column("schema_version", Integer, nullable=False, default=1),
+    Column("schema_version", Integer, nullable=False, default=SCHEMA_VERSION),
     Column("active_version_id", String(36), nullable=True),
     Column("next_number", Integer, nullable=False, default=1),
     Column("seed_rows", JSON, nullable=False),
@@ -71,7 +72,7 @@ dataset_versions = Table(
         "dataset_id", ForeignKey("training_datasets.id"), nullable=False, index=True
     ),
     Column("number", Integer, nullable=False, unique=True),
-    Column("schema_version", Integer, nullable=False, default=1),
+    Column("schema_version", Integer, nullable=False, default=SCHEMA_VERSION),
     Column("parent_version_id", String(36), nullable=True),
     Column("source", String(32), nullable=False),
     Column("creator_id", String(128), nullable=True),
@@ -174,6 +175,11 @@ class DatasetRepository:
                     )
             except IntegrityError:
                 pass
+            connection.execute(
+                update(training_datasets)
+                .where(training_datasets.c.id == DATASET_ID)
+                .values(schema_version=SCHEMA_VERSION)
+            )
 
     @staticmethod
     def _dataset(connection):
@@ -212,6 +218,7 @@ class DatasetRepository:
                 id=version_id,
                 dataset_id=DATASET_ID,
                 number=dataset["next_number"],
+                schema_version=SCHEMA_VERSION,
                 source=source,
                 status="pending",
                 request_key=request_key,
@@ -260,7 +267,7 @@ class DatasetRepository:
                 select(dataset_versions.c.seed_snapshot)
                 .where(
                     dataset_versions.c.status == "ready",
-                    dataset_versions.c.checksum == canonical_checksum,
+                    dataset_versions.c.checksum.in_([canonical_checksum, checksum]),
                 )
                 .order_by(dataset_versions.c.number.desc())
                 .limit(1)
@@ -318,6 +325,7 @@ class DatasetRepository:
                 "criteria_score[]": [scores[item.id] for item in criteria],
                 "criteria_max_score[]": [item.score for item in criteria],
                 "student_score": response["score"],
+                "feedback": response["feedback"] or "",
             }
         )
 
@@ -348,8 +356,7 @@ class DatasetRepository:
                 select(grading_jobs.c.id)
                 .where(
                     grading_jobs.c.attempt_id == attempts.c.id,
-                    grading_jobs.c.submission_version
-                    == attempts.c.submission_version,
+                    grading_jobs.c.submission_version == attempts.c.submission_version,
                 )
                 .correlate(attempts)
                 .scalar_subquery()
@@ -374,16 +381,19 @@ class DatasetRepository:
                 latest.setdefault(attempt["user_id"], attempt)
             fingerprint = digest(
                 [
-                    (
-                        item["id"],
-                        item["status"],
-                        item["submission_version"],
-                        item["revision"],
-                        item["job_id"],
-                    )
-                    for item in sorted(
-                        latest.values(), key=lambda value: value["user_id"]
-                    )
+                    SCHEMA_VERSION,
+                    [
+                        (
+                            item["id"],
+                            item["status"],
+                            item["submission_version"],
+                            item["revision"],
+                            item["job_id"],
+                        )
+                        for item in sorted(
+                            latest.values(), key=lambda value: value["user_id"]
+                        )
+                    ],
                 ]
             )
             waiting = any(item["status"] == "grading" for item in latest.values())
@@ -746,7 +756,9 @@ class DatasetRepository:
             try:
                 validated = parse_training_csv(io.BytesIO(payload))
             except TrainingCsvError as exc:
-                raise TrainingCsvError(f"Published CSV failed validation: {exc}") from exc
+                raise TrainingCsvError(
+                    f"Published CSV failed validation: {exc}"
+                ) from exc
             if len(validated) != len(rows):
                 raise TrainingCsvError(
                     "Published CSV row count does not match the dataset ledger."
