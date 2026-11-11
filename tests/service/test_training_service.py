@@ -1,9 +1,13 @@
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 from uuid import uuid4
 
 import pytest
+from boto3.session import Session
+from botocore.exceptions import ClientError
+from botocore.stub import Stubber
 
 from app.db import GradingConflictError, GradingRecordNotFoundError
 from app.dto.training import TrainingStartRequest
@@ -20,11 +24,12 @@ def setup_service(settings):
     settings.training_state_machine_arn = ARN
     repository = MagicMock()
     repository.get_version.return_value = ({"status": "ready"}, {})
-    workflow = MagicMock()
+    # Match the SDK: a client has close(), but no __enter__/__exit__.
+    workflow = Mock(spec=["start_execution", "exceptions", "close"])
     workflow.exceptions = SimpleNamespace(ExecutionAlreadyExists=ExecutionAlreadyExists)
     workflow.start_execution.return_value = {"executionArn": ARN + ":example"}
     session = MagicMock()
-    session.client.return_value.__enter__.return_value = workflow
+    session.client.return_value = workflow
     return TrainingService(settings, repository), repository, workflow, session
 
 
@@ -48,6 +53,7 @@ def test_manual_training_uses_latest_ready_dataset_and_stable_request(settings):
     assert session.client.call_args.kwargs["region_name"] == "us-east-1"
     assert result.request_id == request.request_id
     assert result.status == "accepted"
+    assert workflow.close.call_count == 3
 
 
 def test_retry_after_execution_finishes_returns_original_execution(settings):
@@ -61,6 +67,46 @@ def test_retry_after_execution_finishes_returns_original_execution(settings):
         result.execution_arn
         == ARN.replace(":stateMachine:", ":execution:") + ":" + name
     )
+    workflow.close.assert_called_once_with()
+
+
+def test_real_stepfunctions_client_starts_and_closes_without_network(settings):
+    service, _, _, session = setup_service(settings)
+    workflow = Session(
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+        region_name="us-east-1",
+    ).client("stepfunctions")
+    session.client.return_value = workflow
+    execution_arn = (
+        "arn:aws:states:us-east-1:123456789012:execution:test-training:example"
+    )
+    with (
+        Stubber(workflow) as stubber,
+        patch.object(workflow, "close", wraps=workflow.close) as close,
+        patch("app.service.training_service.boto3.Session", return_value=session),
+    ):
+        stubber.add_response(
+            "start_execution",
+            {"executionArn": execution_arn, "startDate": datetime.now(UTC)},
+        )
+        result = service.start("2000001", TrainingStartRequest(request_id=uuid4()))
+        assert result.execution_arn == execution_arn
+        assert result.status == "accepted"
+        stubber.assert_no_pending_responses()
+        close.assert_called_once_with()
+
+
+def test_aws_failure_still_closes_client(settings):
+    service, _, workflow, session = setup_service(settings)
+    error = ClientError({"Error": {"Code": "AccessDenied"}}, "StartExecution")
+    workflow.start_execution.side_effect = error
+    with (
+        patch("app.service.training_service.boto3.Session", return_value=session),
+        pytest.raises(ClientError),
+    ):
+        service.start("2000001", TrainingStartRequest(request_id=uuid4()))
+    workflow.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("missing", [True, False])

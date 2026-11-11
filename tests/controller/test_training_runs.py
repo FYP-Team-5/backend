@@ -1,6 +1,6 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -171,7 +171,8 @@ def test_single_row_upload_can_start_normal_training_workflow(
 
     settings.training_state_machine_arn = ARN
     session = MagicMock()
-    workflow = session.client.return_value.__enter__.return_value
+    workflow = Mock(spec=["start_execution", "close"])
+    session.client.return_value = workflow
     workflow.start_execution.return_value = {"executionArn": ARN + ":single-row"}
     monkeypatch.setattr("app.service.training_service.boto3.Session", lambda: session)
     response = client.post(
@@ -181,6 +182,7 @@ def test_single_row_upload_can_start_normal_training_workflow(
     )
     assert response.status_code == 202, response.text
     workflow.start_execution.assert_called_once()
+    workflow.close.assert_called_once_with()
     assert workflow.start_execution.call_args.kwargs["stateMachineArn"] == ARN
 
     payload = candidate()

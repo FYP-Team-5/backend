@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import closing
 
 import boto3
 from botocore.config import Config
@@ -49,8 +50,10 @@ class TrainingService:
             read_timeout=8,
             retries={"mode": "standard", "total_max_attempts": 2},
         )
-        with boto3.Session().client(
-            "stepfunctions", region_name=arn.split(":")[3], config=config
+        with closing(
+            boto3.Session().client(
+                "stepfunctions", region_name=arn.split(":")[3], config=config
+            )
         ) as workflow:
             try:
                 result = workflow.start_execution(
