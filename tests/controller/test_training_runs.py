@@ -9,8 +9,11 @@ from sqlalchemy import select
 
 from app.db import GradingConflictError
 from app.dto.training import TrainingStartResponse
+from app.service.demo_data import DEMO_TRAINING_DATASET
 from app.service.model_registry import control, runs
 from tests.controller.test_submission_workflow import student
+from tests.controller.test_training_dataset_api import upload_csv, wait_version
+from tests.service.test_training_service import ARN
 
 
 def candidate(run_id="a" * 32):
@@ -156,6 +159,42 @@ def test_unconfigured_manual_training_returns_actionable_error(
     )
     assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
+
+
+def test_single_row_upload_can_start_normal_training_workflow(
+    client, settings, instructor_headers, monkeypatch
+):
+    version = upload_csv(client, instructor_headers, DEMO_TRAINING_DATASET.read_bytes())
+    ready = wait_version(client, instructor_headers, version["id"])
+    assert ready["status"] == "ready" and ready["is_active"]
+    assert ready["row_count"] == 1
+
+    settings.training_state_machine_arn = ARN
+    session = MagicMock()
+    workflow = session.client.return_value.__enter__.return_value
+    workflow.start_execution.return_value = {"executionArn": ARN + ":single-row"}
+    monkeypatch.setattr("app.service.training_service.boto3.Session", lambda: session)
+    response = client.post(
+        "/api/v1/training-runs/start",
+        headers=instructor_headers,
+        json={"request_id": str(uuid4())},
+    )
+    assert response.status_code == 202, response.text
+    workflow.start_execution.assert_called_once()
+    assert workflow.start_execution.call_args.kwargs["stateMachineArn"] == ARN
+
+    payload = candidate()
+    payload["metrics"] = {"valid_examples": 1, "final_score_mae": 0}
+    payload["configuration"].update(
+        held_out_evaluation=False, split_strategy="reuse_training_data"
+    )
+    payload["dataset_version"] = version["id"]
+    payload["dataset_checksum"] = ready["checksum"]
+    payload["dataset_stats"] = {"training_rows": 1, "unique_questions": 1}
+    register(client, settings, payload)
+    saved = client.get("/api/v1/training-runs", headers=instructor_headers).json()[0]
+    assert saved["configuration"]["held_out_evaluation"] is False
+    assert saved["dataset_stats"]["training_rows"] == 1
 
 
 @pytest.mark.parametrize(

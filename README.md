@@ -661,13 +661,14 @@ retrying an uncertain response. A 202 acknowledges the workflow request; it does
 not mean GPU training has begun. An absent ready dataset returns 409, and missing
 workflow configuration or unavailable AWS access returns 503.
 
-The optional [one-row training demo](app/demo/training/README.md) runs three epochs
-using the pinned training notebook and saves weights locally. It never uploads
-or deploys them. It also supports offline row preparation:
-
-```bash
-python -m app.demo.training.single_row --prepare-only
-```
+The [one-row demo dataset](app/demo/dataset/README.md) exercises this normal
+training workflow. With demo seeding enabled, startup uploads `single_row.csv`
+once as a new version, including on an existing demo database. Subsequent
+instructor uploads remain active across restarts. Wait for the dataset page to
+show the one-row CSV as active and ready before clicking **Train now**. The
+training runner accepts any nonempty compatible dataset; below ten unique
+questions it reuses training rows for validation and evaluation and records
+`held_out_evaluation=false` in the candidate configuration.
 
 The deployment workflow publishes evaluated adapters to `candidate-<run-id>` branches in `SmuFypTeam5/GradingQlora`, then calls `POST /api/v1/training-runs`. This machine endpoint requires `X-Training-Token` matching `TRAINING_CALLBACK_TOKEN`; it does not accept an instructor JWT in place of that credential. Run ids are immutable and callback replays are idempotent. The manifest records the exact HF commit, dataset identity, effective configuration, candidate metrics and baseline metrics.
 

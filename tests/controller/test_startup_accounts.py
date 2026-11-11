@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.dto import StudentRegistration
 from app.main import create_app
+from tests.controller.test_training_dataset_api import wait_version
 
 
 def test_startup_accounts_can_log_in_and_survive_restart(
@@ -44,6 +45,16 @@ def test_startup_accounts_can_log_in_and_survive_restart(
             if original_users is not None:
                 assert users == original_users
             original_users = users
+            headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+            versions = client.get(
+                "/api/v1/training-dataset/versions", headers=headers
+            ).json()
+            assert len(versions) == 1
+            published = wait_version(client, headers, versions[0]["id"])
+            assert published["status"] == "ready"
+            assert published["is_active"]
+            assert published["filename"] == "single_row.csv"
+            assert published["row_count"] == 1
 
     courses = grading_service.grading_store.list_courses()
     assert [course.course_code for course in courses] == ["DEMO101"]

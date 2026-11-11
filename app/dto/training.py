@@ -45,7 +45,7 @@ class Candidate(BaseModel):
         valid = value.get("valid_examples")
         mae = value.get("final_score_mae")
         if type(valid) not in (int, float) or not math.isfinite(valid) or valid < 1:
-            raise ValueError("Evaluation must contain valid held-out examples")
+            raise ValueError("Evaluation must contain valid examples")
         if type(mae) not in (int, float) or not math.isfinite(mae) or mae < 0:
             raise ValueError("Evaluation must contain a finite nonnegative MAE")
         return value

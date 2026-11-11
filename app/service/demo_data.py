@@ -19,7 +19,7 @@ DEMO_STUDENT_EMAILS = frozenset(
 )
 DEMO_DATA_DIRECTORY = Path(__file__).parents[1] / "demo" / "criteria"
 DEMO_TRAINING_DATASET = (
-    Path(__file__).parents[1] / "demo" / "dataset" / "training_data_moh_eng_rubrics.csv"
+    Path(__file__).parents[1] / "demo" / "dataset" / "single_row.csv"
 )
 
 
@@ -77,17 +77,20 @@ class DemoDataService:
         await self._seed_training_dataset()
 
     async def _seed_training_dataset(self) -> None:
-        """Publish the bundled mock dataset as the first training-dataset version."""
+        """Upload the single-row demo once, including on existing demo databases."""
         if self.dataset_service is None or not DEMO_TRAINING_DATASET.is_file():
-            return
-        if await self.dataset_service.list_versions():
             return
         instructor = next(iter(self.user_repository.list(role="instructor")), None)
         if instructor is None:
             return
         with DEMO_TRAINING_DATASET.open("rb") as source:
             await self.dataset_service.upload(
-                source, instructor.id, DEMO_TRAINING_DATASET.name
+                source,
+                instructor.id,
+                DEMO_TRAINING_DATASET.name,
+                # A stable key migrates older demo datasets once, while keeping
+                # later instructor uploads active across application restarts.
+                request_key="demo-single-row-v1",
             )
 
     @staticmethod
