@@ -62,9 +62,14 @@ async def register(request: Request):
             raise HTTPException(413, "Training metadata exceeds 1 MiB")
     try:
         candidate = Candidate.model_validate_json(payload)
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             request.app.state.model_registry.register, candidate
         )
+        if result.get("auto_deploy_queued"):
+            # Hands-off promotion: start the same checked worker the
+            # instructor Deploy button wakes.
+            request.app.state.model_registry.wake.set()
+        return result
     except ValidationError:
         raise HTTPException(
             422, "Invalid candidate manifest or evaluation metrics"

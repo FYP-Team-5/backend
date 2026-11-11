@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,46 @@ runs = Table(
     Column("error", String(1000)),
     Column("checks", JSON),
 )
+
+
+def auto_deploy_eligible(manifest):
+    """Hands-off promotion gate for TRAINING_AUTO_DEPLOY_ENABLED.
+
+    A candidate must beat the base model on the headline held-out metrics
+    (strictly lower MAE and strictly higher QWK, never a higher invalid
+    output rate) with at least ten valid examples. Missing or non-numeric
+    metrics keep the candidate manual so the review button still applies.
+    """
+    metrics = manifest.get("metrics", {})
+    baseline = manifest.get("baseline_metrics", {})
+
+    def number(container, key):
+        value = container.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    valid = number(metrics, "valid_examples")
+    if valid is None or valid < 10:
+        return False
+    for key, better in (
+        ("final_score_mae", lambda a, b: a < b),
+        ("final_score_qwk", lambda a, b: a > b),
+    ):
+        candidate_value = number(metrics, key)
+        base_value = number(baseline, key)
+        if (
+            candidate_value is None
+            or base_value is None
+            or not better(candidate_value, base_value)
+        ):
+            return False
+    invalid = number(metrics, "invalid_output_rate")
+    base_invalid = number(baseline, "invalid_output_rate")
+    if invalid is not None and base_invalid is not None:
+        return invalid <= base_invalid
+    return True
 control = Table(
     "training_model_control",
     grading_metadata,
@@ -150,6 +191,7 @@ class ModelRegistry:
         ).hexdigest()
         from sqlalchemy.exc import IntegrityError
 
+        inserted = False
         try:
             with self.engine.begin() as connection:
                 connection.execute(
@@ -162,6 +204,7 @@ class ModelRegistry:
                         revision=0,
                     )
                 )
+            inserted = True
         except IntegrityError:
             with self.engine.connect() as connection:
                 original = connection.execute(
@@ -171,7 +214,26 @@ class ModelRegistry:
                 raise GradingConflictError(
                     "This run id was already registered with different metadata"
                 ) from None
-        return {"run_id": candidate.run_id, "registered": True}
+        if not inserted:
+            # Callback replay of an earlier registration never re-queues.
+            return {"run_id": candidate.run_id, "registered": True}
+        queued = False
+        if self.settings.training_auto_deploy_enabled and auto_deploy_eligible(
+            manifest
+        ):
+            try:
+                # Same checked pipeline as the button: smoke tests must pass
+                # before the active pointer moves; a pending deployment for
+                # another run keeps this one a reviewable candidate.
+                self.request_deploy(candidate.run_id, 0, "auto-deploy")
+                queued = True
+            except GradingConflictError:
+                pass
+        return {
+            "run_id": candidate.run_id,
+            "registered": True,
+            "auto_deploy_queued": queued,
+        }
 
     def request_deploy(self, run_id, revision, instructor_id):
         with self.engine.begin() as connection:

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     training_feedback_hf_repo: str = "SmuFypTeam5/feedback"
     training_adapter_directory: str = "/mnt/llm-data/adapters"
     training_max_lora_rank: int = Field(default=64, ge=1, le=512)
+    training_auto_deploy_enabled: bool = False
 
     database_url: str = "postgresql+psycopg://user:change-me@localhost:5433/user"
 

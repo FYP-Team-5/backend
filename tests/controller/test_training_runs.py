@@ -45,6 +45,13 @@ def register(client, settings, payload=None):
     return result
 
 
+def eligible(payload):
+    """Metrics that pass the automatic promotion gate (see auto_deploy_eligible)."""
+    payload["metrics"].update(final_score_qwk=0.9, invalid_output_rate=0.0)
+    payload["baseline_metrics"].update(final_score_qwk=0.7, invalid_output_rate=0.01)
+    return payload
+
+
 def wait_status(client, headers, run_id, status):
     until = time.monotonic() + 3
     while time.monotonic() < until:
@@ -95,6 +102,75 @@ def test_registration_replay_and_conflict(client, settings, instructor_headers):
     assert rows[0]["status"] == "candidate" and not rows[0]["is_active"]
     assert rows[0]["requested_by"] is None
     assert "token" not in rows[0]
+
+
+def test_auto_deploy_promotes_passing_candidates_without_confirmation(
+    client, settings, instructor_headers, monkeypatch
+):
+    settings.training_auto_deploy_enabled = True
+    registry = client.app.state.model_registry
+    monkeypatch.setattr(
+        registry,
+        "check_and_load",
+        AsyncMock(return_value={"smoke_tests": "passed"}),
+    )
+    register(client, settings, eligible(candidate()))
+    row = wait_status(client, instructor_headers, "a" * 32, "deployed")
+    assert row["is_active"] and row["requested_by"] == "auto-deploy"
+    assert registry.active_config()["name"] == "candidate-" + "a" * 32
+    # Callback replays stay idempotent and never re-queue a deployed run.
+    register(client, settings, eligible(candidate()))
+    row = client.get("/api/v1/training-runs", headers=instructor_headers).json()[0]
+    assert row["status"] == "deployed" and row["is_active"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda p: p["metrics"].update(final_score_mae=0.5),
+        lambda p: p["metrics"].update(final_score_qwk=0.7),
+        lambda p: p["metrics"].update(valid_examples=9),
+        lambda p: p["metrics"].update(invalid_output_rate=0.05),
+        lambda p: p["metrics"].pop("final_score_qwk"),
+        lambda p: p["baseline_metrics"].pop("final_score_qwk"),
+    ],
+)
+def test_auto_deploy_leaves_regressions_and_incomplete_metrics_as_candidates(
+    client, settings, instructor_headers, change
+):
+    settings.training_auto_deploy_enabled = True
+    payload = eligible(candidate())
+    change(payload)
+    register(client, settings, payload)
+    rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
+    assert rows[0]["status"] == "candidate" and rows[0]["requested_by"] is None
+    registry = client.app.state.model_registry
+    with registry.engine.connect() as connection:
+        assert connection.execute(select(control.c.pending_run_id)).scalar_one() is None
+
+
+def test_auto_deploy_defers_while_another_deployment_is_pending(
+    client, settings, instructor_headers, monkeypatch
+):
+    settings.training_auto_deploy_enabled = True
+    registry = client.app.state.model_registry
+    release = asyncio.Event()
+
+    async def hold(manifest):
+        await release.wait()
+        return {"smoke_tests": "passed"}
+
+    monkeypatch.setattr(registry, "check_and_load", hold)
+    register(client, settings, eligible(candidate()))
+    wait_status(client, instructor_headers, "a" * 32, "deploying")
+    register(client, settings, eligible(candidate("d" * 32)))
+    rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
+    assert {row["run_id"]: row["status"] for row in rows} == {
+        "a" * 32: "deploying",
+        "d" * 32: "candidate",
+    }
+    release.set()
+    wait_status(client, instructor_headers, "a" * 32, "deployed")
 
 
 def test_training_api_openapi_describes_current_request_and_response_contracts(client):
