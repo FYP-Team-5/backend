@@ -1,20 +1,23 @@
 # Demo training datasets
 
-`single_row.csv` contains one compatible example for the normal **Train now**
-workflow. The full `training_data_moh_eng_rubrics.csv` is retained as a reference.
+`mock_training_data.csv` contains ten compatible examples with ten unique
+questions, selected from the full `training_data_moh_eng_rubrics.csv` reference.
+The normal **Train now** workflow splits these into eight training questions,
+one validation question and one test question using seed 42.
 
-With `SEED_DEMO_USERS=true`, backend startup submits `single_row.csv` through the
-dataset upload service, including on databases with an older demo dataset. The
+With `SEED_DEMO_USERS=true`, backend startup submits `mock_training_data.csv`
+through the dataset upload service, including databases with an older demo dataset. The
 worker publishes it as the newest ready version. The upload is idempotent:
 restarting the backend does not add another version or replace subsequent
-instructor uploads. Wait for **Training dataset** to show `single_row.csv` as
-active and ready with one row before selecting **Trained models → Train now**.
+instructor uploads. Existing single-row demo databases receive this new version
+once. Wait for **Training dataset** to show `mock_training_data.csv` as active
+and ready with ten rows before selecting **Trained models → Train now**.
 No training starts during seeding.
 
 For a running backend, upload this CSV from **Training dataset** to make it the
 latest version. Existing automatically collected closed-test examples are still
 appended by the dataset service; check the published row count before training.
-Use a demo database without collected closed-test rows for an exactly one-row run.
+Use a demo database without collected closed-test rows for an exactly ten-row run.
 
 The deployed training runner supports any nonempty compatible dataset. With
 fewer than ten unique questions it reuses the training data for validation and

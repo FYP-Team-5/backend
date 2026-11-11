@@ -53,8 +53,8 @@ def test_startup_accounts_can_log_in_and_survive_restart(
             published = wait_version(client, headers, versions[0]["id"])
             assert published["status"] == "ready"
             assert published["is_active"]
-            assert published["filename"] == "single_row.csv"
-            assert published["row_count"] == 1
+            assert published["filename"] == "mock_training_data.csv"
+            assert published["row_count"] == 10
 
     courses = grading_service.grading_store.list_courses()
     assert [course.course_code for course in courses] == ["DEMO101"]

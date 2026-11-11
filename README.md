@@ -661,11 +661,12 @@ retrying an uncertain response. A 202 acknowledges the workflow request; it does
 not mean GPU training has begun. An absent ready dataset returns 409, and missing
 workflow configuration or unavailable AWS access returns 503.
 
-The [one-row demo dataset](app/demo/dataset/README.md) exercises this normal
-training workflow. With demo seeding enabled, startup uploads `single_row.csv`
-once as a new version, including on an existing demo database. Subsequent
+The [mock training dataset](app/demo/dataset/README.md) contains ten rows with ten
+unique questions, giving an 8/1/1 training/validation/test split. With demo seeding
+enabled, startup uploads `mock_training_data.csv` once as a new version,
+including on an existing demo database. Subsequent
 instructor uploads remain active across restarts. Wait for the dataset page to
-show the one-row CSV as active and ready before clicking **Train now**. The
+show the mock CSV as active and ready before clicking **Train now**. The
 training runner accepts any nonempty compatible dataset; below ten unique
 questions it reuses training rows for validation and evaluation and records
 `held_out_evaluation=false` in the candidate configuration.

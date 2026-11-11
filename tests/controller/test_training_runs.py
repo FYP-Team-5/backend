@@ -161,19 +161,19 @@ def test_unconfigured_manual_training_returns_actionable_error(
     assert "not configured" in response.json()["detail"]
 
 
-def test_single_row_upload_can_start_normal_training_workflow(
+def test_mock_dataset_upload_can_start_normal_training_workflow(
     client, settings, instructor_headers, monkeypatch
 ):
     version = upload_csv(client, instructor_headers, DEMO_TRAINING_DATASET.read_bytes())
     ready = wait_version(client, instructor_headers, version["id"])
     assert ready["status"] == "ready" and ready["is_active"]
-    assert ready["row_count"] == 1
+    assert ready["row_count"] == 10
 
     settings.training_state_machine_arn = ARN
     session = MagicMock()
     workflow = Mock(spec=["start_execution", "close"])
     session.client.return_value = workflow
-    workflow.start_execution.return_value = {"executionArn": ARN + ":single-row"}
+    workflow.start_execution.return_value = {"executionArn": ARN + ":mock-training"}
     monkeypatch.setattr("app.service.training_service.boto3.Session", lambda: session)
     response = client.post(
         "/api/v1/training-runs/start",
@@ -188,15 +188,15 @@ def test_single_row_upload_can_start_normal_training_workflow(
     payload = candidate()
     payload["metrics"] = {"valid_examples": 1, "final_score_mae": 0}
     payload["configuration"].update(
-        held_out_evaluation=False, split_strategy="reuse_training_data"
+        held_out_evaluation=True, split_strategy="question_group_80_10_10"
     )
     payload["dataset_version"] = version["id"]
     payload["dataset_checksum"] = ready["checksum"]
-    payload["dataset_stats"] = {"training_rows": 1, "unique_questions": 1}
+    payload["dataset_stats"] = {"training_rows": 10, "unique_questions": 10}
     register(client, settings, payload)
     saved = client.get("/api/v1/training-runs", headers=instructor_headers).json()[0]
-    assert saved["configuration"]["held_out_evaluation"] is False
-    assert saved["dataset_stats"]["training_rows"] == 1
+    assert saved["configuration"]["held_out_evaluation"] is True
+    assert saved["dataset_stats"]["training_rows"] == 10
 
 
 @pytest.mark.parametrize(

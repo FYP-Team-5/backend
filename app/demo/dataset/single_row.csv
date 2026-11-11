@@ -1,2 +1,0 @@
-id,question,desired_answer,student_answer,criteria[],criteria_score[],criteria_max_score[],student_score
-1.1,What is the role of a prototype program in problem solving?,To simulate the behaviour of portions of the desired software product.,High risk problems are address in the prototype program to make sure that the program is feasible.  A prototype may also be used to show a company that the software can be possibly programmed.,"[""Answer mentions simulating behaviour of portions of desired software""]",[0],[1],0

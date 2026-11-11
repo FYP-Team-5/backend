@@ -23,18 +23,19 @@ def demo_service(service):
     )
 
 
-def test_bundled_single_row_is_compatible():
+def test_bundled_mock_dataset_has_ten_compatible_unique_questions():
     with DEMO_TRAINING_DATASET.open("rb") as source:
         rows = parse_training_csv(source)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["desired_answer"].strip()
-    assert all(
-        score in (0, maximum)
-        for score, maximum in zip(
-            row["criteria_score[]"], row["criteria_max_score[]"], strict=True
+    assert len(rows) == 10
+    assert len({row["question"].strip() for row in rows}) == 10
+    for row in rows:
+        assert row["desired_answer"].strip()
+        assert all(
+            score in (0, maximum)
+            for score, maximum in zip(
+                row["criteria_score[]"], row["criteria_max_score[]"], strict=True
+            )
         )
-    )
 
 
 def test_demo_upload_replaces_old_dataset_once_and_preserves_later_uploads(dataset):
@@ -45,9 +46,10 @@ def test_demo_upload_replaces_old_dataset_once_and_preserves_later_uploads(datas
     service, _, _, _ = dataset
     old = asyncio.run(
         service.upload(
-            io.BytesIO(encode_training_csv([seed_row(), seed_row("Another answer")])),
+            io.BytesIO(encode_training_csv([seed_row()])),
             "2000001",
-            "previous-demo.csv",
+            "single_row.csv",
+            request_key="demo-single-row-v1",
         )
     )
     drain(service)
@@ -57,9 +59,9 @@ def test_demo_upload_replaces_old_dataset_once_and_preserves_later_uploads(datas
     asyncio.run(demo._seed_training_dataset())
     drain(service)
     rows, active = download(service)
-    assert len(rows) == active["row_count"] == 1
+    assert len(rows) == active["row_count"] == 10
     assert active["is_active"] and active["status"] == "ready"
-    assert active["filename"] == "single_row.csv"
+    assert active["filename"] == "mock_training_data.csv"
     assert active["number"] > old["number"]
 
     asyncio.run(demo._seed_training_dataset())
