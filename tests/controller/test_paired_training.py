@@ -14,7 +14,12 @@ from tests.controller.test_submission_workflow import (
     submit,
     wait_for_result,
 )
-from tests.controller.test_training_runs import candidate, register, wait_status
+from tests.controller.test_training_runs import (
+    candidate,
+    eligible,
+    register,
+    wait_status,
+)
 
 
 def paired_candidate(run_id="a" * 32):
@@ -128,12 +133,8 @@ def test_paired_deployment_pins_both_models_for_accepted_jobs(
     assert saved["_grading_model"] == config
 
 
-@pytest.mark.parametrize(
-    "feedback_text", ["You correctly explain that TLS encrypts traffic.", ""]
-)
-def test_actual_paired_checks_load_and_verify_both_adapters(
-    client, monkeypatch, feedback_text
-):
+@pytest.fixture
+def paired_serving(client, monkeypatch, feedback_text):
     from app.service import model_registry as module
 
     registry = client.app.state.model_registry
@@ -171,6 +172,16 @@ def test_actual_paired_checks_load_and_verify_both_adapters(
         "AsyncClient",
         lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs),
     )
+    return calls
+
+
+@pytest.mark.parametrize(
+    "feedback_text", ["You correctly explain that TLS encrypts traffic.", ""]
+)
+def test_actual_paired_checks_load_and_verify_both_adapters(
+    client, paired_serving, feedback_text
+):
+    registry = client.app.state.model_registry
     if not feedback_text:
         with pytest.raises((ValueError, LLMResponseError)):
             asyncio.run(registry.check_and_load(paired_candidate()))
@@ -179,10 +190,63 @@ def test_actual_paired_checks_load_and_verify_both_adapters(
         assert checks["feedback_response"] == "passed"
         assert checks["pinned_feedback_hf_revision"] == "d" * 40
     loaded = [
-        body["lora_name"] for path, body in calls if path.endswith("load_lora_adapter")
+        body["lora_name"]
+        for path, body in paired_serving
+        if path.endswith("load_lora_adapter")
     ]
     assert loaded == ["candidate-" + "a" * 32, "feedback-candidate-" + "a" * 32]
     assert registry.active_config() is None
+
+
+@pytest.mark.parametrize(
+    "feedback_text", ["You correctly explain that TLS encrypts traffic.", ""]
+)
+def test_auto_deploy_checks_pair_before_replacing_active_models(
+    client, settings, instructor_headers, monkeypatch, paired_serving, feedback_text
+):
+    registry = client.app.state.model_registry
+    previous_id = "e" * 32
+    # Establish the current model; the new candidate uses the real checker below.
+    with monkeypatch.context() as initial:
+        initial.setattr(registry, "check_and_load", AsyncMock(return_value={}))
+        register(client, settings, paired_candidate(previous_id))
+        response = client.post(
+            f"/api/v1/training-runs/{previous_id}/deploy",
+            headers=instructor_headers,
+            json={"revision": 0},
+        )
+        assert response.status_code == 202
+        wait_status(client, instructor_headers, previous_id, "deployed")
+    previous_config = registry.active_config()
+
+    settings.training_auto_deploy_enabled = True
+    payload = eligible(paired_candidate())
+    response = register(client, settings, payload)
+    assert response.json()["registered"] is True
+    status = "deployed" if feedback_text else "failed"
+    row = wait_status(client, instructor_headers, "a" * 32, status)
+    assert row["requested_by"] == "auto-deploy"
+    loaded = [
+        body["lora_name"]
+        for path, body in paired_serving
+        if path.endswith("load_lora_adapter")
+    ]
+    assert loaded == ["candidate-" + "a" * 32, "feedback-candidate-" + "a" * 32]
+    if feedback_text:
+        assert row["is_active"]
+        assert row["checks"]["grading_contract"] == "passed"
+        assert row["checks"]["feedback_response"] == "passed"
+        config = registry.active_config()
+        assert config["hf_revision"] == payload["hf_revision"]
+        assert config["feedback_hf_revision"] == payload["feedback"]["hf_revision"]
+    else:
+        assert not row["is_active"] and row["deployment_error"]
+        assert registry.active_config() == previous_config
+    # Replaying the callback cannot retry deployment or make more model calls.
+    call_count = len(paired_serving)
+    register(client, settings, payload)
+    row = wait_status(client, instructor_headers, "a" * 32, status)
+    assert len(paired_serving) == call_count
 
 
 def test_cache_recovery_restores_feedback_even_if_grading_is_cached(

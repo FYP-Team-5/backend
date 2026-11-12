@@ -11,6 +11,7 @@ services:
       API_KEY: ${API_KEY:-}
       TRAINING_CALLBACK_TOKEN: ${TRAINING_CALLBACK_TOKEN:-}
       TRAINING_STATE_MACHINE_ARN: ${TRAINING_STATE_MACHINE_ARN:-}
+      TRAINING_AUTO_DEPLOY_ENABLED: ${TRAINING_AUTO_DEPLOY_ENABLED:-false}
       TRAINING_HF_REPO: ${TRAINING_HF_REPO:-SmuFypTeam5/GradingQlora}
       TRAINING_FEEDBACK_HF_REPO: ${TRAINING_FEEDBACK_HF_REPO:-SmuFypTeam5/feedback}
       TRAINING_ADAPTER_DIRECTORY: /mnt/llm-data/adapters
@@ -49,6 +50,8 @@ services:
       DATASET_RETRY_SECONDS: ${DATASET_RETRY_SECONDS:-5}
     volumes:
       - ${MODEL_ADAPTER_DIRECTORY:-/mnt/llm-data/adapters}:/mnt/llm-data/adapters
+    group_add:
+      - "${MODEL_ADAPTER_GID:-1000}"
     ports:
       - "${API_PORT:-8002}:8002"
     extra_hosts:
