@@ -139,6 +139,7 @@ async def deploy(
         result = await asyncio.to_thread(
             request.app.state.model_registry.request_deploy,
             run_id,
+            payload.model,
             payload.revision,
             instructor.id,
         )
@@ -148,3 +149,5 @@ async def deploy(
         raise HTTPException(404, "Candidate not found") from None
     except GradingConflictError as error:
         raise HTTPException(409, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error

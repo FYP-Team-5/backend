@@ -1,4 +1,4 @@
-"""Durable candidate review and explicitly requested, checked LoRA deployment."""
+"""Durable candidate review and checked, independently deployed grading and feedback LoRAs."""
 
 import asyncio
 import hashlib
@@ -38,6 +38,9 @@ runs = Table(
     Column("manifest", JSON, nullable=False),
     Column("digest", String(64), nullable=False),
     Column("completed_at", DateTime(timezone=True), nullable=False),
+    # Paired deployment state from before per-model deployments. create_all()
+    # cannot drop columns, so they keep their insert defaults and are read
+    # only once, to seed training_model_deployments on existing databases.
     Column("status", String(20), nullable=False, default="candidate"),
     Column("revision", Integer, nullable=False, default=0),
     Column("requested_by", String(128)),
@@ -84,6 +87,19 @@ def auto_deploy_eligible(manifest):
     if invalid is not None and base_invalid is not None:
         return invalid <= base_invalid
     return True
+
+
+MODELS = ("grading", "feedback")
+
+
+def run_models(manifest):
+    """Deployable models of a run; older grading-only runs have no feedback."""
+    return [model for model in MODELS if model == "grading" or manifest.get("feedback")]
+
+
+# One row per model ("grading", "feedback"), each with its own active pointer,
+# pending deployment and lease. The legacy "production" row held the paired
+# pointer before per-model deployments and is read only while seeding.
 control = Table(
     "training_model_control",
     grading_metadata,
@@ -94,6 +110,54 @@ control = Table(
     Column("lease_until", DateTime(timezone=True)),
 )
 
+deployments = Table(
+    "training_model_deployments",
+    grading_metadata,
+    Column("run_id", String(32), primary_key=True),
+    Column("model", String(20), primary_key=True),
+    Column("status", String(20), nullable=False, default="candidate"),
+    Column("revision", Integer, nullable=False, default=0),
+    Column("requested_by", String(128)),
+    Column("error", String(1000)),
+    Column("checks", JSON),
+)
+
+
+def seed_deployments(connection):
+    """Split the legacy paired deployment state into per-model rows."""
+    legacy = (
+        connection.execute(select(control).where(control.c.id == "production"))
+        .mappings()
+        .first()
+    ) or {}
+    rows = connection.execute(select(runs)).mappings().all()
+    paired = {row["id"] for row in rows if row["manifest"].get("feedback")}
+    for row in rows:
+        for model in run_models(row["manifest"]):
+            connection.execute(
+                insert(deployments).values(
+                    run_id=row["id"],
+                    model=model,
+                    status=row["status"],
+                    revision=row["revision"],
+                    requested_by=row["requested_by"],
+                    error=row["error"],
+                    checks=row["checks"],
+                )
+            )
+    # A grading-only active run served the configured feedback model. A legacy
+    # lease belonged to the previous process, so pending work is claimed again.
+    for model in MODELS:
+        active, pending = legacy.get("active_run_id"), legacy.get("pending_run_id")
+        if model == "feedback":
+            active = active if active in paired else None
+            pending = pending if pending in paired else None
+        connection.execute(
+            insert(control).values(
+                id=model, active_run_id=active, pending_run_id=pending
+            )
+        )
+
 
 class ModelRegistry:
     def __init__(self, settings, store):
@@ -101,21 +165,25 @@ class ModelRegistry:
         self.task = None
         self.wake = asyncio.Event()
 
+    def prepare(self):
+        """Create tables and seed per-model deployment rows once per database."""
+        grading_metadata.create_all(self.engine)
+        # Existing repositories share the same PostgreSQL database.
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with self.engine.begin() as connection:
+                seeded = connection.execute(
+                    select(control.c.id).where(control.c.id == "grading")
+                ).first()
+                if seeded is None:
+                    seed_deployments(connection)
+        except IntegrityError:
+            pass  # Another process seeded the same rows first.
+
     async def initialize(self):
         self.wake = asyncio.Event()
-
-        def initialize():
-            grading_metadata.create_all(self.engine)
-            # Existing repositories share the same PostgreSQL database.
-            from sqlalchemy.exc import IntegrityError
-
-            try:
-                with self.engine.begin() as connection:
-                    connection.execute(insert(control).values(id="production"))
-            except IntegrityError:
-                pass
-
-        await asyncio.to_thread(initialize)
+        await asyncio.to_thread(self.prepare)
         self.task = asyncio.create_task(self.worker(), name="model-deployment-worker")
 
     async def close(self):
@@ -125,56 +193,76 @@ class ModelRegistry:
                 await self.task
 
     def active_config(self):
+        # One statement reads both active pointers from the same snapshot.
         with self.engine.connect() as connection:
-            active = connection.execute(
-                select(runs.c.manifest)
-                .join(
-                    control,
-                    control.c.active_run_id == runs.c.id,
+            active = {
+                model: manifest
+                for model, manifest in connection.execute(
+                    select(control.c.id, runs.c.manifest)
+                    .join(runs, control.c.active_run_id == runs.c.id)
+                    .where(control.c.id.in_(MODELS))
                 )
-                .where(control.c.id == "production")
-            ).scalar_one_or_none()
-        if active is None:
+            }
+        grading, feedback = active.get("grading"), active.get("feedback")
+        if grading is None and feedback is None:
             return None
-        return {
-            "name": "candidate-" + active["run_id"],
-            "contract": active["output_contract"],
-            "hf_revision": active["hf_revision"],
-            "fewshot_name": self.settings.llm_model,
-            "feedback_name": "feedback-candidate-" + active["run_id"]
-            if active.get("feedback")
-            else self.settings.llm_feedback_model,
-            **(
-                {"feedback_hf_revision": active["feedback"]["hf_revision"]}
-                if active.get("feedback")
-                else {}
-            ),
-        }
-
-    def describe(self, row, active):
-        return {
-            **row["manifest"],
-            "status": row["status"],
-            "revision": row["revision"],
-            "is_active": row["id"] == active,
-            "deployment_error": row["error"],
-            "checks": row["checks"],
-            "requested_by": row["requested_by"],
-        }
+        if grading is None:
+            config = {
+                "name": self.settings.llm_model,
+                "contract": self.settings.llm_grading_contract,
+            }
+        else:
+            config = {
+                "name": "candidate-" + grading["run_id"],
+                "contract": grading["output_contract"],
+                "hf_revision": grading["hf_revision"],
+            }
+        config["fewshot_name"] = self.settings.llm_model
+        if feedback is None:
+            config["feedback_name"] = self.settings.llm_feedback_model
+        else:
+            config["feedback_name"] = "feedback-candidate-" + feedback["run_id"]
+            config["feedback_hf_revision"] = feedback["feedback"]["hf_revision"]
+        return config
 
     def list_runs(self):
-        # One statement keeps active status and candidate state in the same snapshot.
-        with self.engine.connect() as connection:
-            query = (
-                select(runs, control.c.active_run_id)
-                .select_from(runs.outerjoin(control, control.c.id == "production"))
-                .order_by(runs.c.completed_at.desc(), runs.c.id.desc())
-                .limit(100)
+        # One statement keeps active pointers and per-model state in the same snapshot.
+        recent = (
+            select(runs.c.id)
+            .order_by(runs.c.completed_at.desc(), runs.c.id.desc())
+            .limit(100)
+            .subquery()
+        )
+        query = (
+            select(runs.c.id, runs.c.manifest, deployments, control.c.active_run_id)
+            .select_from(
+                runs.join(recent, recent.c.id == runs.c.id)
+                .join(deployments, deployments.c.run_id == runs.c.id)
+                .outerjoin(control, control.c.id == deployments.c.model)
             )
-            return [
-                self.describe(row, row["active_run_id"])
-                for row in connection.execute(query).mappings()
-            ]
+            .order_by(
+                runs.c.completed_at.desc(), runs.c.id.desc(), deployments.c.model
+            )
+        )
+        result = {}
+        with self.engine.connect() as connection:
+            for row in connection.execute(query).mappings():
+                run = result.setdefault(
+                    row["id"],
+                    {
+                        **row["manifest"],
+                        "deployments": {"grading": None, "feedback": None},
+                    },
+                )
+                run["deployments"][row["model"]] = {
+                    "status": row["status"],
+                    "revision": row["revision"],
+                    "is_active": row["active_run_id"] == row["id"],
+                    "error": row["error"],
+                    "checks": row["checks"],
+                    "requested_by": row["requested_by"],
+                }
+        return list(result.values())
 
     def register(self, candidate: Candidate):
         if candidate.hf_repo != self.settings.training_hf_repo:
@@ -204,6 +292,13 @@ class ModelRegistry:
                         revision=0,
                     )
                 )
+                connection.execute(
+                    insert(deployments),
+                    [
+                        {"run_id": candidate.run_id, "model": model}
+                        for model in run_models(manifest)
+                    ],
+                )
             inserted = True
         except IntegrityError:
             with self.engine.connect() as connection:
@@ -221,49 +316,57 @@ class ModelRegistry:
         if self.settings.training_auto_deploy_enabled and auto_deploy_eligible(
             manifest
         ):
-            try:
-                # Same checked pipeline as the button: smoke tests must pass
-                # before the active pointer moves; a pending deployment for
-                # another run keeps this one a reviewable candidate.
-                self.request_deploy(candidate.run_id, 0, "auto-deploy")
-                queued = True
-            except GradingConflictError:
-                pass
+            for model in run_models(manifest):
+                try:
+                    # Same checked pipeline as the buttons: each model switches
+                    # only after its own smoke tests pass. A pending deployment
+                    # of that model keeps this one a reviewable candidate.
+                    self.request_deploy(candidate.run_id, model, 0, "auto-deploy")
+                    queued = True
+                except GradingConflictError:
+                    pass
         return {
             "run_id": candidate.run_id,
             "registered": True,
             "auto_deploy_queued": queued,
         }
 
-    def request_deploy(self, run_id, revision, instructor_id):
+    def request_deploy(self, run_id, model, revision, instructor_id):
         with self.engine.begin() as connection:
             owner = (
                 connection.execute(
-                    select(control)
-                    .where(control.c.id == "production")
-                    .with_for_update()
+                    select(control).where(control.c.id == model).with_for_update()
                 )
                 .mappings()
                 .one()
             )
             row = (
                 connection.execute(
-                    select(runs).where(runs.c.id == run_id).with_for_update()
+                    select(deployments)
+                    .where(
+                        deployments.c.run_id == run_id, deployments.c.model == model
+                    )
+                    .with_for_update()
                 )
                 .mappings()
                 .first()
             )
             if row is None:
+                exists = connection.execute(
+                    select(runs.c.id).where(runs.c.id == run_id)
+                ).first()
+                if exists:
+                    raise ValueError("This run has no feedback model to deploy")
                 raise GradingRecordNotFoundError(run_id)
             if owner["active_run_id"] == run_id:
                 return {"status": "deployed"}
             if row["revision"] != revision or owner["pending_run_id"]:
                 raise GradingConflictError(
-                    "Another deployment or newer review is in progress. Refresh and retry."
+                    f"Another {model} deployment or newer review is in progress. Refresh and retry."
                 )
             connection.execute(
-                update(runs)
-                .where(runs.c.id == run_id)
+                update(deployments)
+                .where(deployments.c.run_id == run_id, deployments.c.model == model)
                 .values(
                     status="queued",
                     requested_by=instructor_id,
@@ -273,55 +376,52 @@ class ModelRegistry:
             )
             connection.execute(
                 update(control)
-                .where(control.c.id == "production")
+                .where(control.c.id == model)
                 .values(pending_run_id=run_id)
             )
         return {"status": "queued"}
 
     def claim(self):
-        with self.engine.begin() as connection:
-            owner = (
+        for model in MODELS:
+            with self.engine.begin() as connection:
+                owner = (
+                    connection.execute(
+                        select(control).where(control.c.id == model).with_for_update()
+                    )
+                    .mappings()
+                    .one()
+                )
+                if not owner["pending_run_id"] or (
+                    owner["lease_until"]
+                    and utc_datetime(owner["lease_until"]) > datetime.now(UTC)
+                ):
+                    continue
+                run_id = owner["pending_run_id"]
+                manifest = connection.execute(
+                    select(runs.c.manifest).where(runs.c.id == run_id)
+                ).scalar_one()
+                token = str(uuid.uuid4())
                 connection.execute(
-                    select(control)
-                    .where(control.c.id == "production")
-                    .with_for_update()
+                    update(control)
+                    .where(control.c.id == model)
+                    .values(
+                        lease_token=token,
+                        lease_until=datetime.now(UTC) + timedelta(minutes=15),
+                    )
                 )
-                .mappings()
-                .one()
-            )
-            if not owner["pending_run_id"] or (
-                owner["lease_until"]
-                and utc_datetime(owner["lease_until"]) > datetime.now(UTC)
-            ):
-                return None
-            row = (
                 connection.execute(
-                    select(runs).where(runs.c.id == owner["pending_run_id"])
+                    update(deployments)
+                    .where(deployments.c.run_id == run_id, deployments.c.model == model)
+                    .values(status="deploying")
                 )
-                .mappings()
-                .one()
-            )
-            token = str(uuid.uuid4())
-            connection.execute(
-                update(control)
-                .where(control.c.id == "production")
-                .values(
-                    lease_token=token,
-                    lease_until=datetime.now(UTC) + timedelta(minutes=15),
-                )
-            )
-            connection.execute(
-                update(runs).where(runs.c.id == row["id"]).values(status="deploying")
-            )
-            return row["manifest"], token
+                return model, manifest, token
+        return None
 
-    def finish(self, run_id, token, checks, error=None):
+    def finish(self, model, run_id, token, checks, error=None):
         with self.engine.begin() as connection:
             owner = (
                 connection.execute(
-                    select(control)
-                    .where(control.c.id == "production")
-                    .with_for_update()
+                    select(control).where(control.c.id == model).with_for_update()
                 )
                 .mappings()
                 .one()
@@ -337,16 +437,16 @@ class ModelRegistry:
             if error is None:
                 values["active_run_id"] = run_id
             connection.execute(
-                update(control).where(control.c.id == "production").values(**values)
+                update(control).where(control.c.id == model).values(**values)
             )
             connection.execute(
-                update(runs)
-                .where(runs.c.id == run_id)
+                update(deployments)
+                .where(deployments.c.run_id == run_id, deployments.c.model == model)
                 .values(
                     status="failed" if error else "deployed",
                     error=error,
                     checks=checks,
-                    revision=runs.c.revision + 1,
+                    revision=deployments.c.revision + 1,
                 )
             )
 
@@ -377,75 +477,71 @@ class ModelRegistry:
         return str(directory)
 
     async def ensure_model(self, config):
-        # Restore approved, pinned adapters after host cache loss; never change the active pointer.
+        # Restore approved, pinned adapters after host cache loss; never change the
+        # active pointers. Grading and feedback may come from different runs.
+        pinned = []
         name = config.get("name", "")
-        if not name.startswith("candidate-"):
-            return
+        if name.startswith("candidate-"):
+            pinned.append((name, False, config.get("hf_revision")))
         feedback_name = config.get("feedback_name", "")
-        missing = [
-            (adapter_name, is_feedback)
-            for adapter_name, is_feedback in ((name, False), (feedback_name, True))
-            if adapter_name.startswith(
-                "feedback-candidate-" if is_feedback else "candidate-"
-            )
-            and not all(
-                (
-                    Path(self.settings.training_adapter_directory) / adapter_name / item
-                ).is_file()
+        if feedback_name.startswith("feedback-candidate-"):
+            pinned.append((feedback_name, True, config.get("feedback_hf_revision")))
+        directory = Path(self.settings.training_adapter_directory)
+        for adapter_name, is_feedback, revision in pinned:
+            if all(
+                (directory / adapter_name / item).is_file()
                 for item in ("adapter_config.json", "adapter_model.safetensors")
-            )
-        ]
-        if not missing:
-            return
-
-        def manifest_for_job():
-            with self.engine.connect() as connection:
-                manifest = connection.execute(
-                    select(runs.c.manifest).where(
-                        runs.c.id == name.removeprefix("candidate-")
-                    )
-                ).scalar_one()
-            if manifest["hf_revision"] != config["hf_revision"]:
-                raise ValueError(
-                    "Saved grading revision no longer matches the candidate"
-                )
-            if feedback_name.startswith("feedback-candidate-") and (
-                feedback_name != "feedback-candidate-" + manifest["run_id"]
-                or manifest.get("feedback", {}).get("hf_revision")
-                != config.get("feedback_hf_revision")
             ):
-                raise ValueError(
-                    "Saved feedback revision no longer matches the candidate"
-                )
-            return manifest
+                continue
+            run_id = adapter_name.rsplit("candidate-", 1)[1]
 
-        manifest = await asyncio.to_thread(manifest_for_job)
-        for _, is_feedback in missing:
+            def manifest_for_job(run_id=run_id):
+                with self.engine.connect() as connection:
+                    return connection.execute(
+                        select(runs.c.manifest).where(runs.c.id == run_id)
+                    ).scalar_one()
+
+            manifest = await asyncio.to_thread(manifest_for_job)
+            saved = manifest.get("feedback", {}) if is_feedback else manifest
+            if saved.get("hf_revision") != revision:
+                kind = "feedback" if is_feedback else "grading"
+                raise ValueError(
+                    f"Saved {kind} revision no longer matches the candidate"
+                )
             if is_feedback:
                 await asyncio.to_thread(self.download, manifest, feedback=True)
             else:
                 await asyncio.to_thread(self.download, manifest)
 
-    async def check_and_load(self, manifest):
-        path = await asyncio.to_thread(self.download, manifest)
-        name = "candidate-" + manifest["run_id"]
-        root = self.settings.llm_url.rsplit("/chat/completions", 1)[0]
+    def serving_client(self):
         headers = (
             {"Authorization": f"Bearer {self.settings.llm_api_key}"}
             if self.settings.llm_api_key
             else {}
         )
-        checks = {"pinned_hf_revision": manifest["hf_revision"], "adapter": "passed"}
-        async with httpx.AsyncClient(headers=headers, timeout=120) as client:
-            models = await client.get(root + "/models")
-            models.raise_for_status()
-            available = {item["id"] for item in models.json()["data"]}
-            if name not in available:
-                loaded = await client.post(
-                    root + "/load_lora_adapter",
-                    json={"lora_name": name, "lora_path": path},
-                )
-                loaded.raise_for_status()
+        return httpx.AsyncClient(headers=headers, timeout=120)
+
+    async def load_adapter(self, client, name, path):
+        root = self.settings.llm_url.rsplit("/chat/completions", 1)[0]
+        models = await client.get(root + "/models")
+        models.raise_for_status()
+        if name not in {item["id"] for item in models.json()["data"]}:
+            loaded = await client.post(
+                root + "/load_lora_adapter",
+                json={"lora_name": name, "lora_path": path},
+            )
+            loaded.raise_for_status()
+
+    async def check_and_load(self, model, manifest):
+        if model == "feedback":
+            return await self.check_feedback(manifest)
+        return await self.check_grading(manifest)
+
+    async def check_grading(self, manifest):
+        path = await asyncio.to_thread(self.download, manifest)
+        name = "candidate-" + manifest["run_id"]
+        async with self.serving_client() as client:
+            await self.load_adapter(client, name, path)
             llm = LocalLLMClient(url=self.settings.llm_url, model=name, client=client)
             if manifest["output_contract"] == "criteria_array_v1":
                 # Test both classes and response length with two independent inputs.
@@ -476,54 +572,57 @@ class ModelRegistry:
                     raise ValueError(
                         "Candidate failed the JSON grading compatibility smoke test"
                     )
-            if manifest.get("feedback"):
-                feedback_path = await asyncio.to_thread(
-                    self.download, manifest, feedback=True
-                )
-                feedback_name = "feedback-candidate-" + manifest["run_id"]
-                if feedback_name not in available:
-                    loaded = await client.post(
-                        root + "/load_lora_adapter",
-                        json={"lora_name": feedback_name, "lora_path": feedback_path},
-                    )
-                    loaded.raise_for_status()
-                feedback_llm = LocalLLMClient(
-                    url=self.settings.llm_url, model=feedback_name, client=client
-                )
-                result = await feedback_llm.generate_feedback(
-                    model=feedback_name,
-                    system_prompt="You are a computer science tutor. Give concise feedback in plain text.",
-                    user_prompt="Question: Why is HTTPS secure?\nReference answer: HTTPS encrypts traffic using TLS.\nStudent answer: HTTPS uses TLS encryption.\nKey points: 1. [MET] Mentions encryption 2. [MET] Mentions TLS",
-                )
-                if not result.feedback.strip():
-                    raise ValueError("Feedback candidate returned empty text")
-                checks.update(
-                    feedback_adapter="passed",
-                    feedback_response="passed",
-                    pinned_feedback_hf_revision=manifest["feedback"]["hf_revision"],
-                )
-        return {**checks, "grading_contract": "passed", "smoke_tests": "passed"}
+        return {
+            "pinned_hf_revision": manifest["hf_revision"],
+            "adapter": "passed",
+            "grading_contract": "passed",
+            "smoke_tests": "passed",
+        }
+
+    async def check_feedback(self, manifest):
+        path = await asyncio.to_thread(self.download, manifest, feedback=True)
+        name = "feedback-candidate-" + manifest["run_id"]
+        async with self.serving_client() as client:
+            await self.load_adapter(client, name, path)
+            llm = LocalLLMClient(url=self.settings.llm_url, model=name, client=client)
+            result = await llm.generate_feedback(
+                model=name,
+                system_prompt="You are a computer science tutor. Give concise feedback in plain text.",
+                user_prompt="Question: Why is HTTPS secure?\nReference answer: HTTPS encrypts traffic using TLS.\nStudent answer: HTTPS uses TLS encryption.\nKey points: 1. [MET] Mentions encryption 2. [MET] Mentions TLS",
+            )
+            if not result.feedback.strip():
+                raise ValueError("Feedback candidate returned empty text")
+        return {
+            "pinned_hf_revision": manifest["feedback"]["hf_revision"],
+            "adapter": "passed",
+            "feedback_response": "passed",
+        }
 
     async def process(self):
         claimed = await asyncio.to_thread(self.claim)
         if claimed is None:
             return False
-        manifest, token = claimed
+        model, manifest, token = claimed
         try:
-            checks = await asyncio.wait_for(self.check_and_load(manifest), timeout=600)
+            checks = await asyncio.wait_for(
+                self.check_and_load(model, manifest), timeout=600
+            )
         except asyncio.CancelledError:
             raise  # Expiring persisted lease allows recovery after restart.
         except Exception as error:  # noqa: BLE001 - persist failed durable work without switching production
             # Do not persist token-bearing URLs or remote response bodies.
             await asyncio.to_thread(
                 self.finish,
+                model,
                 manifest["run_id"],
                 token,
                 {},
-                f"Compatibility/deployment failed ({type(error).__name__}). Check server configuration and retry.",
+                f"{model.capitalize()} compatibility/deployment failed ({type(error).__name__}). Check server configuration and retry.",
             )
         else:
-            await asyncio.to_thread(self.finish, manifest["run_id"], token, checks)
+            await asyncio.to_thread(
+                self.finish, model, manifest["run_id"], token, checks
+            )
         return True
 
     async def worker(self):
@@ -532,10 +631,13 @@ class ModelRegistry:
         while True:
             self.wake.clear()
             try:
-                await self.process()
+                # Drain queued work: a grading and a feedback deployment can both wait.
+                processed = await self.process()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logging.getLogger(__name__).exception("Model deployment worker failed")
-            with suppress(TimeoutError):
-                await asyncio.wait_for(self.wake.wait(), timeout=5)
+                processed = False
+            if not processed:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self.wake.wait(), timeout=5)

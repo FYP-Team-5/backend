@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.db import GradingConflictError
 from app.dto.training import TrainingStartResponse
 from app.service.demo_data import DEMO_TRAINING_DATASET
-from app.service.model_registry import control, runs
+from app.service.model_registry import control, deployments
 from tests.controller.test_submission_workflow import student
 from tests.controller.test_training_dataset_api import upload_csv, wait_version
 from tests.service.test_training_service import ARN
@@ -52,13 +52,22 @@ def eligible(payload):
     return payload
 
 
-def wait_status(client, headers, run_id, status):
+def deploy(client, headers, run_id, model="grading", revision=0):
+    return client.post(
+        f"/api/v1/training-runs/{run_id}/deploy",
+        headers=headers,
+        json={"model": model, "revision": revision},
+    )
+
+
+def wait_status(client, headers, run_id, status, model="grading"):
+    """Wait for one model's deployment status; return that model's state."""
     until = time.monotonic() + 3
     while time.monotonic() < until:
         records = client.get("/api/v1/training-runs", headers=headers).json()
         row = next(item for item in records if item["run_id"] == run_id)
-        if row["status"] == status:
-            return row
+        if row["deployments"][model]["status"] == status:
+            return row["deployments"][model]
         time.sleep(0.01)
     raise AssertionError(records)
 
@@ -99,8 +108,10 @@ def test_registration_replay_and_conflict(client, settings, instructor_headers):
     )
     rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
     assert len(rows) == 1 and rows[0]["hf_revision"] == "c" * 40
-    assert rows[0]["status"] == "candidate" and not rows[0]["is_active"]
-    assert rows[0]["requested_by"] is None
+    grading = rows[0]["deployments"]["grading"]
+    assert grading["status"] == "candidate" and not grading["is_active"]
+    assert grading["requested_by"] is None
+    assert rows[0]["deployments"]["feedback"] is None  # Grading-only run.
     assert "token" not in rows[0]
 
 
@@ -115,13 +126,14 @@ def test_auto_deploy_promotes_passing_candidates_without_confirmation(
         AsyncMock(return_value={"smoke_tests": "passed"}),
     )
     register(client, settings, eligible(candidate()))
-    row = wait_status(client, instructor_headers, "a" * 32, "deployed")
-    assert row["is_active"] and row["requested_by"] == "auto-deploy"
+    grading = wait_status(client, instructor_headers, "a" * 32, "deployed")
+    assert grading["is_active"] and grading["requested_by"] == "auto-deploy"
     assert registry.active_config()["name"] == "candidate-" + "a" * 32
     # Callback replays stay idempotent and never re-queue a deployed run.
     register(client, settings, eligible(candidate()))
     row = client.get("/api/v1/training-runs", headers=instructor_headers).json()[0]
-    assert row["status"] == "deployed" and row["is_active"]
+    grading = row["deployments"]["grading"]
+    assert grading["status"] == "deployed" and grading["is_active"]
 
 
 @pytest.mark.parametrize(
@@ -143,10 +155,12 @@ def test_auto_deploy_leaves_regressions_and_incomplete_metrics_as_candidates(
     change(payload)
     register(client, settings, payload)
     rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
-    assert rows[0]["status"] == "candidate" and rows[0]["requested_by"] is None
+    grading = rows[0]["deployments"]["grading"]
+    assert grading["status"] == "candidate" and grading["requested_by"] is None
     registry = client.app.state.model_registry
     with registry.engine.connect() as connection:
-        assert connection.execute(select(control.c.pending_run_id)).scalar_one() is None
+        pending = connection.execute(select(control.c.pending_run_id)).scalars()
+        assert set(pending) == {None}
 
 
 def test_auto_deploy_defers_while_another_deployment_is_pending(
@@ -156,7 +170,7 @@ def test_auto_deploy_defers_while_another_deployment_is_pending(
     registry = client.app.state.model_registry
     release = asyncio.Event()
 
-    async def hold(manifest):
+    async def hold(model, manifest):
         await release.wait()
         return {"smoke_tests": "passed"}
 
@@ -165,7 +179,7 @@ def test_auto_deploy_defers_while_another_deployment_is_pending(
     wait_status(client, instructor_headers, "a" * 32, "deploying")
     register(client, settings, eligible(candidate("d" * 32)))
     rows = client.get("/api/v1/training-runs", headers=instructor_headers).json()
-    assert {row["run_id"]: row["status"] for row in rows} == {
+    assert {row["run_id"]: row["deployments"]["grading"]["status"] for row in rows} == {
         "a" * 32: "deploying",
         "d" * 32: "candidate",
     }
@@ -187,8 +201,13 @@ def test_training_api_openapi_describes_current_request_and_response_contracts(c
         "application/json"
     ]["schema"]
     assert response["items"]["$ref"].endswith("/TrainingRunResponse")
-    detail = schema["components"]["schemas"]["TrainingRunResponse"]
-    assert "requested_by" in detail["properties"]
+    components = schema["components"]["schemas"]
+    assert "deployments" in components["TrainingRunResponse"]["required"]
+    assert {"grading", "feedback"} <= set(components["ModelDeployments"]["properties"])
+    assert "requested_by" in components["ModelDeployment"]["properties"]
+    deploy_request = components["DeployRequest"]
+    assert set(deploy_request["required"]) == {"model", "revision"}
+    assert deploy_request["properties"]["model"]["enum"] == ["grading", "feedback"]
     deployment = routes["/api/v1/training-runs/{run_id}/deploy"]["post"]["responses"][
         "202"
     ]["content"]["application/json"]["schema"]
@@ -394,7 +413,7 @@ def test_review_and_deployment_reject_students_and_callback_tokens(client, setti
     for method, path, payload in (
         ("GET", "/training-runs", None),
         ("GET", "/training-runs/in-progress", None),
-        ("POST", f"/training-runs/{'a' * 32}/deploy", {"revision": 0}),
+        ("POST", f"/training-runs/{'a' * 32}/deploy", {"model": "grading", "revision": 0}),
     ):
         assert (
             client.request(
@@ -422,29 +441,19 @@ def test_explicit_deployment_checks_then_switches_and_failed_candidate_preserves
         return_value={"grading_contract": "passed", "smoke_tests": "passed"}
     )
     monkeypatch.setattr(registry, "check_and_load", check)
-    response = client.post(
-        f"/api/v1/training-runs/{'a' * 32}/deploy",
-        headers=instructor_headers,
-        json={"revision": 0},
-    )
+    response = deploy(client, instructor_headers, "a" * 32)
     assert response.status_code == 202
-    row = wait_status(client, instructor_headers, "a" * 32, "deployed")
-    assert row["is_active"] and row["checks"]["smoke_tests"] == "passed"
+    grading = wait_status(client, instructor_headers, "a" * 32, "deployed")
+    assert grading["is_active"] and grading["checks"]["smoke_tests"] == "passed"
+    assert check.call_args.args[0] == "grading"
     assert registry.active_config()["name"] == "candidate-" + "a" * 32
     register(client, settings, candidate("d" * 32))
     monkeypatch.setattr(
         registry, "check_and_load", AsyncMock(side_effect=ValueError("invalid output"))
     )
-    assert (
-        client.post(
-            f"/api/v1/training-runs/{'d' * 32}/deploy",
-            headers=instructor_headers,
-            json={"revision": 0},
-        ).status_code
-        == 202
-    )
+    assert deploy(client, instructor_headers, "d" * 32).status_code == 202
     failed = wait_status(client, instructor_headers, "d" * 32, "failed")
-    assert not failed["is_active"] and failed["deployment_error"]
+    assert not failed["is_active"] and failed["error"]
     assert registry.active_config()["name"] == "candidate-" + "a" * 32
 
 
@@ -452,20 +461,15 @@ def test_stale_deploy_is_rejected_and_stale_worker_cannot_activate(
     client, settings, instructor_headers
 ):
     register(client, settings)
-    assert (
-        client.post(
-            f"/api/v1/training-runs/{'a' * 32}/deploy",
-            headers=instructor_headers,
-            json={"revision": 4},
-        ).status_code
-        == 409
-    )
+    assert deploy(client, instructor_headers, "a" * 32, revision=4).status_code == 409
     registry = client.app.state.model_registry
-    registry.finish("a" * 32, "old-token", {"checks": "passed"})
+    registry.finish("grading", "a" * 32, "old-token", {"checks": "passed"})
     assert registry.active_config() is None
     with registry.engine.connect() as connection:
-        assert connection.execute(select(runs.c.status)).scalar_one() == "candidate"
-        assert connection.execute(select(control.c.active_run_id)).scalar_one() is None
+        status = connection.execute(select(deployments.c.status)).scalar_one()
+        assert status == "candidate"
+        active = connection.execute(select(control.c.active_run_id)).scalars()
+        assert set(active) == {None}
 
 
 def test_binary_client_contract_is_strict_and_uses_training_prompt():
@@ -534,11 +538,7 @@ def test_deployed_binary_adapter_uses_weights_and_freezes_model_for_accepted_job
     )
     monkeypatch.setattr(registry, "ensure_model", AsyncMock())
     register(client, settings)
-    client.post(
-        f"/api/v1/training-runs/{'a' * 32}/deploy",
-        headers=instructor_headers,
-        json={"revision": 0},
-    )
+    deploy(client, instructor_headers, "a" * 32)
     wait_status(client, instructor_headers, "a" * 32, "deployed")
     llm_client.grade_binary.return_value = [1]
     quiz = make_test(client, instructor_headers)
@@ -597,7 +597,7 @@ def test_actual_deployment_checks_loaded_model_with_both_binary_classes(
             transport=httpx.MockTransport(respond), **kwargs
         ),
     )
-    result = asyncio.run(registry.check_and_load(candidate()))
+    result = asyncio.run(registry.check_and_load("grading", candidate()))
     assert result["smoke_tests"] == "passed"
     assert calls[0][1] == {
         "lora_name": "candidate-" + "a" * 32,

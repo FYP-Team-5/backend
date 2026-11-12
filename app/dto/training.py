@@ -76,13 +76,28 @@ class Candidate(BaseModel):
         return value.astimezone(UTC)
 
 
-class TrainingRunResponse(Candidate):
+TrainedModel = Literal["grading", "feedback"]
+
+
+class ModelDeployment(BaseModel):
+    """Deployment state of one adapter; grading and feedback deploy separately."""
+
     status: Literal["candidate", "queued", "deploying", "deployed", "failed"]
     revision: int = Field(ge=0)
     is_active: bool
-    deployment_error: str | None
+    error: str | None
     checks: dict | None
     requested_by: str | None
+
+
+class ModelDeployments(BaseModel):
+    grading: ModelDeployment
+    # None for older grading-only runs, which have no feedback adapter.
+    feedback: ModelDeployment | None
+
+
+class TrainingRunResponse(Candidate):
+    deployments: ModelDeployments
 
 
 class TrainingRegistrationResponse(BaseModel):
@@ -101,6 +116,7 @@ class TrainingRunInProgress(BaseModel):
 
 
 class DeployRequest(BaseModel):
+    model: TrainedModel
     revision: int = Field(ge=0)
 
 
